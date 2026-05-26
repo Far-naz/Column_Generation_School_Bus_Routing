@@ -18,9 +18,9 @@ def main() -> None:
     problem_model = InputModel(
         number_of_vehicles=2,
         capacity_of_vehicle=10,
-        max_travel_distance=110.29,
+        max_travel_distance=111.0,
         data_source=DataSource.REAL,
-        allowed_walking_distance=0.5,
+        allowed_walking_distance=1.5,
         school_id=33337,
     )
     model_info = (
@@ -95,3 +95,11 @@ if __name__ == "__main__":
 
 
 # 25: 42539, 75: 33231, 89: 42373, 120: 33243,10: 33337
+
+#TODO
+'''
+run two thing: students pickup from their home addresses, 2. min route distance problem
+Could you find a pareto frontier with one step for it to show?
+run 10 instances for MILP, column generation
+
+'''

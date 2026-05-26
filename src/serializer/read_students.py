@@ -1,4 +1,4 @@
-from module.stop import Stop
+from module.stop_point import Stop
 import matplotlib.pyplot as plt
 from helper.distance_calculator import compute_distance_two_points
 from module.input_model import DataSource
@@ -27,54 +27,6 @@ def read_stops_from_file(data_source=DataSource.TOY, school_id=33337) -> list[St
     return stops
 
 
-def find_covering_stops(all_stops, stds, max_walking_distance, distance_dic):
-    # find covering stops for each customer stop
-    covering_stops = {}
-    lst_indx = stds[-1].id
-    indx = lst_indx + 1
-    # depot is covered by itself
-    depot: Stop = next(s for s in all_stops if s.is_depot)
-    depot.second_idx = 0
-    covering_stops[depot.id] = [depot]
-
-    for cust in stds:
-        covering_stops[cust.id] = []
-        for stop in all_stops:
-            dist = compute_distance_two_points(cust, stop, distance_dic)
-            if dist <= max_walking_distance:
-                if stop.id != cust.id:
-                    stop_copy = Stop(
-                        Id=stop.id,
-                        is_depot=stop.is_depot,
-                        is_student=stop.is_student,
-                        lat=stop.lat,
-                        lon=stop.lon,
-                    )
-                    stop_copy.second_idx = indx
-                    stop_copy.std_id = cust.id
-                    stop_copy.is_covered = True
-                    indx += 1
-                else:
-                    stop_copy = cust  # reference to the customer stop itself
-                    stop_copy.second_idx = cust.id
-                    stop_copy.std_id = cust.id
-                covering_stops[cust.id].append(stop_copy)
-
-    last_index = indx
-    # make a hard copy of depot with second_idx 0
-    depot_copy = Stop(
-        Id=depot.id,
-        is_depot=depot.is_depot,
-        is_student=depot.is_student,
-        lat=depot.lat,
-        lon=depot.lon,
-    )
-    depot_copy.second_idx = last_index
-    covering_stops[last_index] = [depot_copy]
-
-    return covering_stops
-
-
 def get_all_stops(covering_stops):
     all_stops = []
     for stops in covering_stops.values():
@@ -91,9 +43,6 @@ def get_all_stops(covering_stops):
         )
     return all_stops
 
-
-def get_N_H(all_stops: list[Stop]) -> list[int]:
-    return [nh.second_idx for nh in all_stops]
 
 
 def get_students(stops):

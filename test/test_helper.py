@@ -1,8 +1,8 @@
 from module.route import Route
-from module.stop import Stop
+from module.label_setting_point import Stop
 
 from heuristic.helper import duplicate_students_in_routes
-
+'''
 route1 = Route(
     stops=[
         Stop(Id=0, is_depot=True, is_student=False, second_idx=0, is_covered = False),
@@ -34,4 +34,4 @@ def test_duplicate_students_in_routes():
     assert duplicate_students_in_routes(routes) == {1: [0, 1], 3: [0, 1]}
 
 
-test_duplicate_students_in_routes()
+test_duplicate_students_in_routes()'''

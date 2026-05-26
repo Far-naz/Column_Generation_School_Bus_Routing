@@ -1,3 +1,84 @@
+from module.input_model import InputModel
+from module.stop_point import Stop, Student
+from module.route import Route
+from heuristic.label_setting import LabelSettingAlgorithmPulling
+
+def nearest_insertion_route(
+    students: list[Student], problem_model: InputModel, seed: int
+) -> Route:
+
+    unvisited_stops = students.copy()
+    unvisited_stops.sort(
+        key=lambda s: problem_model.distance_matrix[
+            (problem_model.first_depot.second_id, s.second_id)
+        ]
+    )
+
+    first_stop = problem_model.first_depot
+    last_stop = problem_model.last_depot
+
+    route_stops = [first_stop, last_stop]
+    total_distance = problem_model.distance_matrix[
+        (first_stop.second_id, last_stop.second_id)
+    ]
+    total_walking_distance = 0.0
+
+    max_it = 10
+    while unvisited_stops and max_it > 0:
+        max_it -= 1
+        best_insertion = None
+        best_insertion_cost = float("inf")
+        for stop in unvisited_stops:
+            for i in range(1, len(route_stops)):
+                prev_stop = route_stops[i - 1]
+                next_stop = route_stops[i]
+                added_distance = (
+                    problem_model.distance_matrix[(prev_stop.second_id, stop.second_id)]
+                    + problem_model.distance_matrix[
+                        (stop.second_id, next_stop.second_id)
+                    ]
+                    - problem_model.distance_matrix[
+                        (prev_stop.second_id, next_stop.second_id)
+                    ]
+                )
+                if added_distance < best_insertion_cost:
+                    best_insertion_cost = added_distance
+                    best_insertion = (stop, i, added_distance)
+
+        if best_insertion is None:
+            break
+
+        stop_to_insert, insert_position, distance_increase = best_insertion
+        route_stops.insert(insert_position, stop_to_insert)
+        total_distance += distance_increase
+        unvisited_stops.remove(stop_to_insert)
+
+    new_route = Route(
+        stops=route_stops,
+        total_distance=total_distance,
+        total_walking_distance=total_walking_distance,
+        served_students=[s.second_id for s in route_stops],
+    )
+    print(f"Final route stops after nearest insertion: {str(new_route)}.")
+    return new_route
+
+def create_giant_feasible_route(route: Route, model):
+    label_setting = LabelSettingAlgorithmPulling(
+        route, model
+    )
+    improved_route: Route | None = label_setting.run()
+    if improved_route is not None:
+        if route.total_distance < improved_route.total_distance:
+           print(
+               f"Improved route via label setting: Stops {[s.second_id for s in improved_route.stops]}, "
+               f"Total distance: {improved_route.total_distance}, Total cost: {improved_route.cost}, total walking distance: {improved_route.total_walking_distance}"
+           )
+        return improved_route
+        # else:
+        # print(f'the route could not be improved via label setting, improved cost: {improved_route.total_distance}, improved cost: {improved_route.cost}, total walking distance: {improved_route.total_walking_distance}')
+    else:
+        return route
+
 '''from module.stop_point import Stop, STOP_TYPE,Student
 from module.route import Route
 from module.input_model import InputModel

@@ -26,7 +26,7 @@ class InputModel:
 
     students: list[Student]
     all_stops: list[Stop]
-    walking_dis_list: list[float]
+    walking_distance_list: list[float]
     school: Stop
     all_stop_ids: list[int]
     all_student_ids: list[int]
