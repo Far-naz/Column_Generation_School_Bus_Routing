@@ -42,3 +42,11 @@ class Route:
         string_result += f"Served students: {self.served_students}"
             
         return string_result
+    
+    def __eq__(self, other):
+        if not isinstance(other, Route):
+            return False
+        return [s.second_id for s in self.stops] == [s.second_id for s in other.stops]
+    
+    def __hash__(self):
+        return hash(tuple(s.second_id for s in self.stops))

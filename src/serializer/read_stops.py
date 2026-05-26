@@ -5,7 +5,7 @@ from helper.distance_calculator import compute_distance_two_points, DistanceMetr
 
 
 def _read_students_from_file(data_file: str, school_id: int) -> list[Student]:
-    students = []
+    students:list[Student] =[]
     # csv file with header ClientId,AddrId,SubscriptionTemplateId,LocName,schooltype,LocId,schoollat,schoollon,FromAddrType,ToAddrType,adresslat,adresslon,grade,requestedtimeinbound,requestedtimeoutbound
     df = pd.read_csv(data_file)
     df_school = df[df["LocId"] == school_id]
@@ -15,11 +15,13 @@ def _read_students_from_file(data_file: str, school_id: int) -> list[Student]:
         name = row["ClientId"]
         lat = float(row["adresslat"]) / 1e6
         lon = float(row["adresslon"]) / 1e6
-        student = Student(
-            id=student_id, lat=lat, lon=lon, second_id=student_id, name=name
-        )
-        students.append(student)
-        idx += 1
+        existed = [ss for ss in students if lat == ss.lat and lon == ss.lon]
+        if len(existed) == 0:
+            student = Student(
+                id=student_id, lat=lat, lon=lon, second_id=student_id, name=name
+            )
+            students.append(student)
+            idx += 1
 
     return students
 

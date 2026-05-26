@@ -36,6 +36,12 @@ class Stop:
 
     def __hash__(self) -> int:
         return hash(self.second_id)
+    
+    def __eq__(self, other):
+        if not isinstance(other, Stop):
+            return False
+        return self.second_id == other.second_id
+    
 
 
 class Student(Stop):

@@ -208,6 +208,7 @@ def _nearest_insertion(
     problem_model: InputModel,
     pi: dict[int, float],
     mu: float,
+    new_route: bool = False,
 ) -> Route | None:
 
     all_students = [s for s in problem_model.students]
@@ -218,24 +219,42 @@ def _nearest_insertion(
     )
 
     unvisited_stops: list[Student] = []
-    for s in problem_model.students:
+    for s in all_students:
         if s.second_id not in route.served_students:
-            unvisited_stops.append(s)
+            if new_route:
+                if pi[s.second_id] > 0:
+                    unvisited_stops.append(s)
+            else:
+                unvisited_stops.append(s)
 
     best_route = None
     successfully_added = False
-    curr_route = route.__copy__()
+    if new_route:
+        #print(f'unvisitedstops: {[p.second_id for p in unvisited_stops]}')
+        curr_route = Route(
+            stops=[problem_model.first_depot, problem_model.last_depot],
+            total_distance=0.0,
+            total_walking_distance=0.0,
+            served_students=[],
+        )
+    else:
+        curr_route = route.__copy__()
     while unvisited_stops:
         std = unvisited_stops[0]
         temp_route = best_pickup_for_student(problem_model, std, curr_route, pi, mu)
+        #if new_route and temp_route is not None:
+        #    print(f'new student added: {list(temp_route.served_students)}')
         if temp_route is not None:
             if (
                 temp_route.total_distance <= problem_model.max_travel_distance
-                and len(temp_route.served_students) <= problem_model.number_of_vehicles
+                and len(temp_route.served_students) <= problem_model.capacity_of_vehicle
             ):
                 curr_route = temp_route
                 successfully_added = True
         unvisited_stops.remove(std)
+    
+    #if new_route:
+    #    print(f'selected route:{[st for st in curr_route.served_students]},sucessfully added, and cost is {curr_route.cost}, stops: {[s.second_id for s in curr_route.stops]}')
     if successfully_added and curr_route.cost < 0:
         best_route = curr_route
         print(
@@ -250,6 +269,7 @@ def generate_routes(
     problem_model: InputModel,
     pi: dict[int, float],
     mu: float,
+    lambdas: list[float],
     logger: logging.Logger,
 ) -> tuple[ModelSuccess, list[Route]]:
     logger.info("Starting heuristic pricing problem.")
@@ -261,12 +281,26 @@ def generate_routes(
     while iteration < route_len and try_new:
         route = routes_eligible[iteration]
         new_route = _nearest_insertion(route, problem_model, pi, mu)
-        if new_route is not None and new_route.cost < 0:
+        if new_route is not None:
             added, routes = _add_route_to_master(new_route, routes, logger)
             if added:
                 try_new = False
                 return ModelSuccess.SUCCESS, routes
         iteration += 1
+
+    if try_new:
+        #print("heuristic cannot find, but try again among positive lambdas")
+        route_pos_lambada = [i for i, l in enumerate(lambdas) if l > 0.0]
+        #print(f"number of positive lambdas:{len(route_pos_lambada)}")
+        for pos_lambda in route_pos_lambada:
+            new_extra_route = _nearest_insertion(
+                routes[pos_lambda], problem_model, pi, mu, True
+            )
+            if new_extra_route is not None:
+                added, routes = _add_route_to_master(new_extra_route, routes, logger)
+                if added:
+                    try_new = False
+                    return ModelSuccess.SUCCESS, routes
 
     logger.info("No improving route found in heuristic pricing problem.")
     return ModelSuccess.NO_NEW_ROUTE, routes
