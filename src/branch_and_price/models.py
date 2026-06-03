@@ -126,7 +126,8 @@ def restricted_master_problem(
         route.lambda_value = lambda_values[r]
 
     # Routes filtered out by branching should not look active
-    filtered_out = [r for r in routes if r not in feasible_routes]
+    feasible_ids = {id(r) for r in feasible_routes}
+    filtered_out = [r for r in routes if id(r) not in feasible_ids]
     for route in filtered_out:
         route.lambda_value = 0.0
 
