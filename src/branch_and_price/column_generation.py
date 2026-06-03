@@ -119,7 +119,7 @@ class ColumnGenerationSolver:
                     )
                 else:
                     heuristic_mode, routes = generate_routes(
-                        routes, self.problem_model, pi, mu, self.logger
+                        routes, self.problem_model, pi, mu, rmp.lambda_values, self.logger
                     )
 
                 routes = keep_only_branch_feasible_new_routes(
@@ -318,7 +318,7 @@ def main_column_generation(
         routes=routes,
         logger=logger,
         branch_rules=[],
-        max_iter=100,
+        max_iter=500,
         is_heuristic=True,
     )
 

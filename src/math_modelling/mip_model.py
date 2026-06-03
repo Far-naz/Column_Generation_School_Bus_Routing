@@ -3,6 +3,7 @@ from datetime import datetime
 from module.input_model import InputModel
 from module.sucess_result import ModelSuccess
 from module.route import Route
+import math
 
 import logging
 import gurobipy as gp
@@ -30,7 +31,7 @@ def _build_route_solution(
     input_model: InputModel,
     decision_var: DecisionVar,
     logger: logging.Logger,
-)->list[Route]:
+) -> list[Route]:
     K = input_model.number_of_vehicles
     S = input_model.students
     N_H = input_model.all_stop_ids[:-1]
@@ -194,7 +195,7 @@ def _build_decision_variables(sp: gp.Model, problem_model: InputModel) -> Decisi
     u = {}
     for s in S_ids:
         for k in range(K):
-            u[s, k] = sp.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=Q - 1)
+            u[s, k] = sp.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=Q - 1, name=f"u_{s}_{k}")
 
     z = {}
     for i in N_H:
@@ -211,6 +212,7 @@ def main_problem(problem_model: InputModel, logger: logging.Logger):
     N_H = problem_model.all_stop_ids[:-1]
     W = problem_model.walking_distance_list
 
+    logger.info("min total walking distance.")
     logger.info(f"number of nodes: {len(N_H)}")
 
     sp = gp.Model("main_problem")
@@ -247,16 +249,28 @@ def main_problem(problem_model: InputModel, logger: logging.Logger):
         final_route = _build_route_solution(sp, problem_model, decision_var, logger)
 
         return ModelSuccess.SUCCESS, final_route
+    elif sp.status == GRB.TIME_LIMIT:
+        ub = sp.ObjVal if sp.SolCount > 0 else math.inf  # best feasible solution found
+        lb = sp.ObjBound  # best proven lower bound
+        gap = sp.MIPGap  # relative gap = (UB-LB)/|UB|
+        logger.warning(f"Time limit hit. LB={lb:.4f}, UB={ub:.4f}, gap={gap:.2%}")
+
+        if sp.SolCount > 0:
+            final_route = _build_route_solution(sp, problem_model, decision_var, logger)
+            return ModelSuccess.INFEASIBLE, final_route
+        else:
+            return ModelSuccess.INFEASIBLE, None
     else:
         logger.warning(f"Subproblem not optimal or infeasible; status: {sp.status}")
         return ModelSuccess.INFEASIBLE, None
 
 
-def shotest_path_problem(problem_model: InputModel, logger: logging.Logger):
+def shotest_path(problem_model: InputModel, logger: logging.Logger):
     K = problem_model.number_of_vehicles
     d = problem_model.distance_matrix
     N_H = problem_model.all_stop_ids[:-1]
 
+    logger.info("min the shortest path problem")
     logger.info(f"number of nodes: {len(N_H)}")
 
     sp = gp.Model("main_shortest_path_problem")
@@ -274,9 +288,59 @@ def shotest_path_problem(problem_model: InputModel, logger: logging.Logger):
     sp.params.TimeLimit = 1800
     sp.params.OutputFlag = 0
 
-
     start_time = datetime.now()
 
+    sp.optimize()
+
+    end_time = datetime.now()
+
+    elapsed_time = end_time - start_time
+    logger.info(f"Main problem solved in {elapsed_time.total_seconds():.2f} seconds")
+
+    if sp.status == GRB.OPTIMAL:
+
+        final_route = _build_route_solution(sp, problem_model, decision_var, logger)
+
+        return ModelSuccess.SUCCESS, final_route
+    else:
+        logger.warning(f"Subproblem not optimal or infeasible; status: {sp.status}")
+        return ModelSuccess.INFEASIBLE, None
+
+
+def minmax_problem(problem_model: InputModel, logger: logging.Logger):
+    K = problem_model.number_of_vehicles
+    d = problem_model.distance_matrix
+    N_H = problem_model.all_stop_ids[:-1]
+
+    logger.info("the min max problem of route distance")
+    logger.info(f"number of nodes: {len(N_H)}")
+
+    sp = gp.Model("min_max_path_problem")
+
+    decision_var: DecisionVar = _build_decision_variables(sp, problem_model)
+
+    x = decision_var.x
+    TMAX = sp.addVar(lb=0, vtype=GRB.CONTINUOUS)
+    sp = _build_constraints(sp, decision_var, problem_model)
+
+    # obj = gp.quicksum(
+    #    d[i, j] * x[i, j, k] for i in N_H for j in N_H if i != j for k in range(K)
+    # )
+
+    for k in range(K):
+        sp.addConstr(
+            gp.quicksum(d[i, j] * x[i, j, k] for i in N_H for j in N_H if i != j)
+            <= TMAX
+        )
+
+    sp.setObjective(TMAX, GRB.MINIMIZE)
+
+    sp.params.TimeLimit = 1800
+    sp.params.OutputFlag = 0
+
+    start_time = datetime.now()
+    sp.write("model.lp")
+    # sp.relax()
     sp.optimize()
 
     end_time = datetime.now()
