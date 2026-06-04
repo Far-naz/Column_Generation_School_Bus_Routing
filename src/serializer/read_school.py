@@ -16,7 +16,7 @@ def _read_school_from_file(data_file: str, school_id: int) -> Stop:
     loc_id = df_filtered.iloc[0]["LocId"]
 
     return Stop(
-        lat=lat, lon=lon, id=0, second_id=0, stop_type=STOP_TYPE.SCHOOL, name=loc_id
+        lat=lat, lon=lon, id=0, second_id=0, stop_type=STOP_TYPE.SCHOOL, name=loc_id, student_id=0
     )
 
 

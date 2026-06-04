@@ -34,7 +34,7 @@ def _read_bus_stops_from_file(data_file: str) -> list[Stop]:
         name = row["StopId"]
         lat = float(row["Lat"]) / 1e6
         lon = float(row["Lon"]) / 1e6
-        stop = Stop(id=name, lat=lat, lon=lon, stop_type=STOP_TYPE.BUSSTOP, name=name)
+        stop = Stop(id=name, lat=lat, lon=lon, stop_type=STOP_TYPE.BUSSTOP, name=name, student_id=-1)
         stops.append(stop)
 
     return stops
@@ -77,6 +77,7 @@ def _covering_stop_points(
                 second_id=last_id,
                 stop_type=stop.stop_type,
                 name=stop.name,
+                student_id=student.second_id
             )
             covered_list.append(covered_stop)
             last_id += 1
@@ -117,7 +118,8 @@ def get_all_stops(school: Stop, students: list[Student]) -> list[Stop]:
         lon=school.lon,
         stop_type=STOP_TYPE.SCHOOL,
         second_id=last_idx,
-        name = school.name
+        name = school.name,
+        student_id=school.student_id
     )
     all_stop_list.append(last_school)
     return all_stop_list

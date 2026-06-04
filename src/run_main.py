@@ -1,6 +1,6 @@
 from module.input_model import InputModel, DataSource
 from helper.logger_setup import setup_logger
-from math_modelling.mip_model import main_problem, shotest_path, minmax_problem
+from math_modelling.mip_model import main_problem, shotest_path_problem
 from module.sucess_result import ModelSuccess
 from branch_and_price.column_generation import main_column_generation
 from module.route import Route
@@ -17,20 +17,18 @@ def main() -> None:
     shortest_path_problem = False
     problem_model = InputModel(
         number_of_vehicles=2,
-        capacity_of_vehicle=50,
-        max_travel_distance=98.14,
+        capacity_of_vehicle=10,
+        max_travel_distance=111.0,
         data_source=DataSource.REAL,
-        allowed_walking_distance=0.1,
-        school_id=40755, 
+        allowed_walking_distance=1.5,
+        school_id=33337,
     )
-
     model_info = (
         f"[S={len(problem_model.students)}"
         f",B={problem_model.number_of_vehicles}"
         f",Cap={problem_model.capacity_of_vehicle}"
         f",D={problem_model.max_travel_distance}"
         f",W={problem_model.allowed_walking_dist}]"
-        f",SID={problem_model.school_id}]"
     )
 
     print(f"total number of stops: {len(problem_model.all_stops)}")
@@ -39,7 +37,7 @@ def main() -> None:
         if shortest_path_problem:
             logger = setup_logger(f"milp_model_shortest_path_{model_info}")
 
-            result, routes = minmax_problem(problem_model, logger)
+            result, routes = shotest_path_problem(problem_model, logger)
         else:
             logger = setup_logger(f"milp_model_{model_info}")
 
@@ -94,14 +92,14 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    #problem_model = InputModel(
-    #    number_of_vehicles=2,
-    #    capacity_of_vehicle=30,
-    #    max_travel_distance=111.89,
-    #    data_source=DataSource.REAL,
-    #    allowed_walking_distance=0.0,
-    #    school_id=44076,
-    #)
-    #print(f'number of students:{len(problem_model.students)}')
 
-# 18: 42539, 75: 33231, 89: 42373, 120: 33243,10: 33337, 25: 40755, 71: 44076
+
+# 25: 42539, 75: 33231, 89: 42373, 120: 33243,10: 33337
+
+#TODO
+'''
+run two thing: students pickup from their home addresses, 2. min route distance problem
+Could you find a pareto frontier with one step for it to show?
+run 10 instances for MILP, column generation
+
+'''

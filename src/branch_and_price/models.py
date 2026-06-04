@@ -338,10 +338,6 @@ def pricing_problem(
     sp.optimize()
 
     if sp.status == GRB.OPTIMAL:
-        # if sp.ObjVal > -0.1:
-        #    logger.info(f"{[z[i].X for i in N_H]}")
-        #    logger.info(f"{[y[s].X for s in S_ids]}")
-
         obj_calculated = (
             sum(W[i] for i in N_H if z[i].X > 0.5)
             - sum(pi[s] for s in S_ids if y[s].X > 0.5)

@@ -1,55 +1,26 @@
-from module.stop import Stop
+from module.stop_point import Stop, STOP_TYPE
 import pandas as pd
 
 
 def read_all_stops():
-    stops_2 = [
-        Stop(Id=1, is_depot=True, is_student=False, lat=5, lon=7),
-        Stop(Id=2, is_student=True, lat=3, lon=7),
-        Stop(Id=3, is_student=True, lat=2, lon=8),
-        Stop(Id=4, is_student=True, lat=7, lon=11),
-        Stop(Id=5, is_student=True, lat=8, lon=10),
-        Stop(Id=6, is_student=True, lat=10, lon=12),
-        Stop(Id=7, is_student=True, lat=8, lon=17),
-        Stop(Id=8, is_student=True, lat=15, lon=10),
-        Stop(Id=9, is_student=False, lat=2, lon=12),
-        Stop(Id=10, is_student=False, lat=4, lon=16),
-        Stop(Id=11, is_student=False, lat=7, lon=13),
-        Stop(Id=12, is_student=False, lat=11, lon=13),
-        Stop(Id=13, is_student=False, lat=12, lon=7),
-        Stop(Id=14, is_student=False, lat=14, lon=10),
-        Stop(Id=15, is_depot=True, is_student=False, lat=5, lon=7),
-    ]
-    stops2 = [
-        Stop(Id=1, is_depot=True, is_student=False, lat=1, lon=4),
-        Stop(Id=2, is_depot=False, is_student=True, lat=3, lon=7),
-        Stop(Id=3, is_depot=False, is_student=True, lat=5, lon=2),
-        Stop(Id=4, is_depot=False, is_student=False, lat=7, lon=6),
-        Stop(Id=5, is_depot=False, is_student=True, lat=8, lon=7),
-        Stop(Id=6, is_depot=False, is_student=True, lat=7, lon=9),
-        Stop(Id=7, is_depot=False, is_student=False, lat=11, lon=4),
-        Stop(Id=8, is_depot=False, is_student=True, lat=12, lon=5),
-        Stop(Id=9, is_depot=False, is_student=True, lat=14, lon=4),
-        Stop(Id=10, is_depot=False, is_student=True, lat=9, lon=7),
-        Stop(Id=11, is_depot=False, is_student=True, lat=8, lon=8),
-        Stop(Id=12, is_depot=True, is_student=False, lat=1, lon=4),
-    ]
     stops = [
-        Stop(Id=0, is_depot=True, is_student=False, lon=8, lat=8),
-        Stop(Id=1, is_depot=False, is_student=True, lon=11, lat=2.5),
-        Stop(Id=2, is_depot=False, is_student=True, lon=5, lat=0),
-        Stop(Id=3, is_depot=False, is_student=True, lon=2.5, lat=7),
-        Stop(Id=4, is_depot=False, is_student=True, lon=3, lat=8),
-        Stop(Id=5, is_depot=False, is_student=True, lon=3.5, lat=8.5),
-        Stop(Id=6, is_depot=False, is_student=False, lon=10, lat=2),
-        Stop(Id=7, is_depot=False, is_student=False, lon=9, lat=2.5),
-        Stop(Id=8, is_depot=False, is_student=False, lon=5.5, lat=1),
-        Stop(Id=9, is_depot=False, is_student=False, lon=4, lat=0),
-        Stop(Id=10, is_depot=False, is_student=False, lon=2, lat=6),
-        Stop(Id=11, is_depot=False, is_student=False, lon=2, lat=7),
-        Stop(Id=12, is_depot=False, is_student=False, lon=2, lat=9),
-        Stop(Id=13, is_depot=False, is_student=False, lon=4, lat=9),
+        Stop(student_id = 1, name = 1, id=1, stop_type=STOP_TYPE.SCHOOL, lat=5, lon=7),
+        Stop(student_id = 2, name = 2, id=2, stop_type=STOP_TYPE.STUDENT, lat=3, lon=7),
+        Stop(student_id = 3, name = 3, id=3, stop_type=STOP_TYPE.STUDENT, lat=2, lon=8),
+        Stop(student_id = 4, name = 4, id=4, stop_type=STOP_TYPE.STUDENT, lat=7, lon=11),
+        Stop(student_id = 5, name = 5, id=5, stop_type=STOP_TYPE.STUDENT, lat=8, lon=10),
+        Stop(student_id = 6, name = 6, id=6, stop_type=STOP_TYPE.STUDENT, lat=10, lon=12),
+        Stop(student_id = 7, name = 7, id=7, stop_type=STOP_TYPE.STUDENT, lat=8, lon=17),
+        Stop(student_id = 8, name = 8, id=8, stop_type=STOP_TYPE.STUDENT, lat=15, lon=10),
+        Stop(student_id = 9, name = 9, id=9, stop_type=STOP_TYPE.BUSSTOP, lat=2, lon=12),
+        Stop(student_id = 10, name = 10, id=10, stop_type=STOP_TYPE.BUSSTOP, lat=4, lon=16),
+        Stop(student_id = 11, name = 11, id=11, stop_type=STOP_TYPE.BUSSTOP, lat=7, lon=13),
+        Stop(student_id = 12, name = 12, id=12, stop_type=STOP_TYPE.BUSSTOP, lat=11, lon=13),
+        Stop(student_id = 13, name = 13, id=13, stop_type=STOP_TYPE.BUSSTOP, lat=12, lon=7),
+        Stop(student_id = 14, name = 14, id=14, stop_type=STOP_TYPE.BUSSTOP, lat=14, lon=10),
+        Stop(student_id = 15, name = 15, id=15, stop_type=STOP_TYPE.SCHOOL,lat=5, lon=7)
     ]
+    
     return stops
 
 
@@ -64,7 +35,7 @@ def read_bus_stops(data_file: str, lst_index: int) -> list[Stop]:
         name = row["StopId"]
         lat = float(row["Lat"]) / 1e6
         lon = float(row["Lon"]) / 1e6
-        stop = Stop(Id=stop_id, is_depot=False, is_student=False, lat=lat, lon=lon, name=name)
+        stop = Stop(id=stop_id, stop_type=STOP_TYPE.BUSSTOP, lat=lat, lon=lon, name=name, student_id=-1)
         stops.append(stop)
 
     return stops
@@ -82,7 +53,7 @@ def get_schools(data_file: str, school_id: int ) -> list[Stop]:
         lat = float(row["Lat"]) / 1e6
         lon = float(row["Lon"]) / 1e6
         school = Stop(
-            Id=school_id, is_depot=True, is_student=False, lat=lat, lon=lon, name=name
+            id=school_id, stop_type=STOP_TYPE.SCHOOL, lat=lat, lon=lon, name=name, student_id=-1
         )
         schools.append(school)
 
@@ -101,7 +72,7 @@ def read_students_locations(data_file: str, school_id: int) -> list[Stop]:
         lat = float(row["adresslat"]) / 1e6
         lon = float(row["adresslon"]) / 1e6
         student = Stop(
-            Id=student_id, is_depot=False, is_student=True, lat=lat, lon=lon, name=name
+            id=student_id, stop_type=STOP_TYPE.STUDENT, lat=lat, lon=lon, name=name, student_id=student_id
         )
         students.append(student)
         idx += 1
