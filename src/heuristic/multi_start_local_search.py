@@ -24,7 +24,6 @@ class LargeNeighborhoodSearch:
         for iter in range(self.max_iter):
             print("-------------------")
             random.seed(datetime.now().timestamp())
-            seed_val = random.random()
             giant_route: Route | None = nearest_insertion_route(
                 self.model.students, self.model, iter
             )

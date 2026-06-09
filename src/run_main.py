@@ -1,6 +1,6 @@
 from module.input_model import InputModel, DataSource
 from helper.logger_setup import setup_logger
-from math_modelling.mip_model import main_problem, shotest_path_problem
+from math_modelling.mip_model import main_problem, shotest_path, minmax_problem
 from module.sucess_result import ModelSuccess
 from branch_and_price.column_generation import main_column_generation
 from module.route import Route
@@ -37,7 +37,7 @@ def main() -> None:
         if shortest_path_problem:
             logger = setup_logger(f"milp_model_shortest_path_{model_info}")
 
-            result, routes = shotest_path_problem(problem_model, logger)
+            result, routes = minmax_problem(problem_model, logger)
         else:
             logger = setup_logger(f"milp_model_{model_info}")
 

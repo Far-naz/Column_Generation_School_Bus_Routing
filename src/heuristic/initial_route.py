@@ -138,8 +138,8 @@ def farthest_insertion_route(
 def nearest_insertion_route(
     students: list[Student],
     problem_model: InputModel,
-    seed: float,
-    greediness: float = 0.1,  # 0.0 = fully random, 1.0 = fully greedy
+    seed: int,
+    greediness: float = 0.01,  # 0.0 = fully random, 1.0 = fully greedy
 ) -> Route:
     """
     Nearest insertion heuristic for the giant tour.
@@ -203,7 +203,8 @@ def nearest_insertion_route(
             break
 
         # --- GRASP-style elite selection --------------------------------
-        candidates.sort(key=lambda c: c[0])
+        #candidates.sort(key=lambda c: c[0])
+        candidates.sort(key=lambda c: (c[0], c[1].second_id, c[2]))
 
         elite_size = max(1, int(len(candidates) * greediness))
         # Clamp so at seed=0 with greediness=1.0 we still get deterministic

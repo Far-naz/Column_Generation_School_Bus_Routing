@@ -339,7 +339,7 @@ def minmax_problem(problem_model: InputModel, logger: logging.Logger):
     sp.params.OutputFlag = 0
 
     start_time = datetime.now()
-    sp.write("model.lp")
+    #sp.write("model.lp")
     # sp.relax()
     sp.optimize()
 
