@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from branch_and_price.models import restricted_master_problem, pricing_problem
 from branch_and_price.pricing_heuristic import (
@@ -16,6 +16,7 @@ from branch_and_price.branch_and_bound import (
 )
 from module.branch import BranchRule, BPNode
 from module.input_model import InputModel
+from module.dual_history import DualHistory
 from module.result_model import RMPResult
 from module.route import Route
 from module.sucess_result import ModelSuccess
@@ -32,6 +33,7 @@ class ColumnGenerationResult:
     rmp: RMPResult | None
     result_mode: ModelSuccess
     integer_found: bool
+    dual_history: DualHistory = field(default_factory=DualHistory)
 
 
 def _count_selected_integer_routes(
@@ -81,13 +83,19 @@ class ColumnGenerationSolver:
         self.branch_rules = branch_rules if branch_rules is not None else []
         self.max_iter = max_iter
         self.is_heuristic = is_heuristic
+        self.dual_history = DualHistory()
+
+    def _result(self, **kwargs) -> ColumnGenerationResult:
+        return ColumnGenerationResult(**kwargs, dual_history=self.dual_history)
 
     def run(self, routes: list[Route]) -> ColumnGenerationResult:
+        # A solver instance may be run more than once; each run gets its own trace.
+        self.dual_history = DualHistory()
         self.logger.info("Starting column generation loop with %s initial routes.", len(routes))
 
         if len(routes) == 0:
             self.logger.info("No initial routes provided. Ending column generation.")
-            return ColumnGenerationResult(
+            return self._result(
                 success=False, routes=routes, rmp=None,
                 result_mode=ModelSuccess.INFEASIBLE, integer_found=False,
             )
@@ -114,13 +122,19 @@ class ColumnGenerationSolver:
 
             if not rmp.success:
                 self.logger.info("RMP not optimal.")
-                return ColumnGenerationResult(
+                return self._result(
                     success=False, routes=routes, rmp=rmp,
                     result_mode=ModelSuccess.INFEASIBLE, integer_found=False,
                 )
 
             last_rmp = rmp
             pi, mu = rmp.pi, rmp.mu
+            self.dual_history.record(
+                iteration=it + 1,
+                pi=pi,
+                mu=mu,
+                objective=rmp.obj_value,
+            )
             routes_before = copy.deepcopy(routes)
             column_added = False
 
@@ -190,14 +204,14 @@ class ColumnGenerationSolver:
 
                     elif result_mode == ModelSuccess.TIME_LIMIT:
                         self.logger.warning("Exact pricing hit time limit. Cannot certify optimality.")
-                        return ColumnGenerationResult(
+                        return self._result(
                             success=True, routes=routes_before, rmp=rmp,
                             result_mode=ModelSuccess.TIME_LIMIT, integer_found=False,
                         )
 
                     elif result_mode == ModelSuccess.INFEASIBLE:
                         self.logger.error("Exact pricing subproblem failed to solve (status error).")
-                        return ColumnGenerationResult(
+                        return self._result(
                             success=False, routes=routes_before, rmp=rmp,
                             result_mode=ModelSuccess.INFEASIBLE, integer_found=False,
                         )
@@ -224,14 +238,14 @@ class ColumnGenerationSolver:
 
                 elif result_mode == ModelSuccess.TIME_LIMIT:
                     self.logger.warning("Exact pricing hit time limit. Cannot certify optimality.")
-                    return ColumnGenerationResult(
+                    return self._result(
                         success=True, routes=routes_before, rmp=rmp,
                         result_mode=ModelSuccess.TIME_LIMIT, integer_found=False,
                     )
 
                 elif result_mode == ModelSuccess.INFEASIBLE:
                     self.logger.error("Exact pricing subproblem failed to solve (status error).")
-                    return ColumnGenerationResult(
+                    return self._result(
                         success=False, routes=routes_before, rmp=rmp,
                         result_mode=ModelSuccess.INFEASIBLE, integer_found=False,
                     )
@@ -247,7 +261,7 @@ class ColumnGenerationSolver:
                         "dummy route is still active (obj=%s) — this node is infeasible.",
                         rmp.obj_value,
                     )
-                    return ColumnGenerationResult(
+                    return self._result(
                         success=False, routes=routes, rmp=rmp,
                         result_mode=ModelSuccess.INFEASIBLE, integer_found=False,
                     )
@@ -255,13 +269,13 @@ class ColumnGenerationSolver:
                 int_lambda_count = _count_selected_integer_routes(master_routes, rmp.lambda_values)
                 if rmp.is_integer and int_lambda_count <= self.problem_model.number_of_vehicles:
                     self.logger.info("Optimal integer solution found after pricing convergence.")
-                    return ColumnGenerationResult(
+                    return self._result(
                         success=True, routes=routes, rmp=rmp,
                         result_mode=ModelSuccess.SUCCESS, integer_found=True,
                     )
 
                 self.logger.info("Column generation converged but solution is fractional.")
-                return ColumnGenerationResult(
+                return self._result(
                     success=True, routes=routes, rmp=rmp,
                     result_mode=ModelSuccess.NO_NEW_ROUTE, integer_found=False,
                 )
@@ -269,7 +283,7 @@ class ColumnGenerationSolver:
             # Otherwise a column was added — loop continues, re-solving the RMP.
 
         self.logger.info("Reached maximum iterations: %s", self.max_iter)
-        return ColumnGenerationResult(
+        return self._result(
             success=last_rmp is not None and last_rmp.success,
             routes=routes, rmp=last_rmp, result_mode=result_mode,
             integer_found=last_rmp.is_integer if last_rmp else False,
