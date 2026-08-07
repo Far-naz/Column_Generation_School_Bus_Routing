@@ -6,3 +6,4 @@ class ModelSuccess(Enum):
     INFEASIBLE = 3
     NO_NEW_ROUTE = 4
     NO_SOLUTION = 5
+    TIME_LIMIT = 6

@@ -26,4 +26,5 @@ def create_initial_route(
         served_students=[student.second_id for student in students],
         total_walking_distance=10000,
         total_distance=route_distance,
+        is_dummy = True
     )

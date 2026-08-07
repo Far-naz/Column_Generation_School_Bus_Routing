@@ -20,6 +20,7 @@ def check_new_route_is_duplicate(
     """Check if the new route is a duplicate of any existing route."""
     new_route_stops = nodes
     for route in existing_routes:
+        # todo how list is comparing.
         existing_route_stops = [stop.second_id for stop in route.stops]
         if new_route_stops == existing_route_stops or new_route_stops == list(
             reversed(existing_route_stops)
@@ -45,7 +46,7 @@ def restricted_master_problem(
         return_full
     - By default returns only (pi, mu), so your existing code remains compatible.
     """
-
+    print("RMP is started.")
     if branch_rules is None:
         branch_rules = []
 
@@ -167,6 +168,7 @@ def pricing_problem(
         list of BranchRule(student_a, student_b, mode)
         mode in {"together", "none"}
     """
+    print("exact procing is started.")
     if branch_rules is None:
         branch_rules = []
 
@@ -176,7 +178,7 @@ def pricing_problem(
     cache_key = (id(problem_model), branch_signature)
     cached_model = None  # _PRICING_MODEL_CACHE.get(cache_key)
 
-    N_H = problem_model.all_stop_ids
+    N_H = problem_model.all_stop_ids[:-1]
     S = problem_model.students
     S_ids = problem_model.all_student_ids
     W = problem_model.walking_distance_list
@@ -201,7 +203,7 @@ def pricing_problem(
         x_hat = sp.addVars(S_depot, S_depot, vtype=GRB.BINARY, name="x_hat")
 
         u = {
-            s: sp.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=Q - 1, name=f"u_{s}")
+            s: sp.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=Q, name=f"u_{s}")
             for s in S_ids
         }
         z = {i: sp.addVar(vtype=GRB.BINARY, name=f"z_{i}") for i in N_H}
@@ -234,18 +236,18 @@ def pricing_problem(
             gp.quicksum(x[first_depot_index, j] for j in N_H if j != first_depot_index)
             == 1
         )
+        #sp.addConstr(
+        #    gp.quicksum(x[j, first_depot_index] for j in N_H if j != first_depot_index)
+        #    == 0
+        #)
         sp.addConstr(
             gp.quicksum(x[j, first_depot_index] for j in N_H if j != first_depot_index)
-            == 0
-        )
-        sp.addConstr(
-            gp.quicksum(x[j, last_depot_index] for j in N_H if j != last_depot_index)
             == 1
         )
-        sp.addConstr(
-            gp.quicksum(x[last_depot_index, j] for j in N_H if j != last_depot_index)
-            == 0
-        )
+        #sp.addConstr(
+        #    gp.quicksum(x[last_depot_index, j] for j in N_H if j != last_depot_index)
+        #    == 0
+        #)
 
         sp.addConstrs(gp.quicksum(x[i, j] for j in N_H if j != i) == z[i] for i in N_H)
 
@@ -266,7 +268,7 @@ def pricing_problem(
         )
         sp.addConstr(
             gp.quicksum(
-                x[j, last_depot_index]
+                x[j, first_depot_index]
                 for j in N_H
                 if j not in (first_depot_index, last_depot_index)
             )
@@ -275,7 +277,7 @@ def pricing_problem(
 
         sp.addConstr(gp.quicksum(y[s] for s in S_ids) <= Q)
         sp.addConstr(
-            gp.quicksum(d[i, j] * x[i, j] for (i, j) in x) <= max_route_distance
+            gp.quicksum(d[i, j] * x[i, j] for i in N_H for j in N_H if i != j) <= max_route_distance
         )
 
         sp.addConstrs(
@@ -307,7 +309,7 @@ def pricing_problem(
                 raise ValueError(f"Unknown branch rule mode: {rule.mode}")
 
         obj = (
-            gp.quicksum(W[i] * z[i] for i in N_H)
+            gp.quicksum(W[i] * z[i] for i in N_H if i != first_depot_index)
             - gp.quicksum(pi[s] * y[s] for s in S_ids)
             - mu
         )
@@ -337,7 +339,11 @@ def pricing_problem(
     # ---- Solve ----
     sp.optimize()
 
-    if sp.status == GRB.OPTIMAL:
+    if sp.status == GRB.OPTIMAL or (sp.status == GRB.TIME_LIMIT and sp.SolCount > 0):
+        if sp.status == GRB.TIME_LIMIT:
+            logger.warning(
+                f"Pricing subproblem hit time limit but found incumbent: obj={sp.objVal:.6f}"
+            )
         obj_calculated = (
             sum(W[i] for i in N_H if z[i].X > 0.5)
             - sum(pi[s] for s in S_ids if y[s].X > 0.5)
@@ -348,6 +354,7 @@ def pricing_problem(
         logger.info(
             f"Subproblem objective (reduced cost): {sp.objVal}, manual calculation of Obj:{obj_calculated}"
         )
+        print(f'Exact price is finished by obj:{obj_calculated}')
 
         if obj_calculated < -1e-6:
 
@@ -358,7 +365,7 @@ def pricing_problem(
             current = first
             visited = {first}
 
-            while current != last:
+            while True:
                 next_nodes = [
                     j for j in N_H if (current, j) in x and x[current, j].X > 0.5
                 ]
@@ -371,6 +378,9 @@ def pricing_problem(
 
                 next_node = next_nodes[0]
 
+                if next_node == first:
+                    break
+
                 if next_node in visited:
                     logger.warning("Cycle detected in route extraction")
                     break
@@ -380,14 +390,16 @@ def pricing_problem(
                 current = next_node
 
             # final validation
-            if new_nodes[-1] != last:
-                logger.warning("Extracted path does not end at last depot")
-                return mr.ModelSuccess.NO_NEGATIVE_ROUTE, routes
+            #if new_nodes[-1] != first:
+            #    logger.warning("Extracted path does not end at last depot")
+            #    return mr.ModelSuccess.NO_NEGATIVE_ROUTE, routes
 
-            is_duplicate = check_new_route_is_duplicate(new_nodes, routes)
-            if is_duplicate:
-                logger.info("New route is a duplicate. Skipping.")
-                return mr.ModelSuccess.NO_NEW_ROUTE, routes
+            new_nodes.append(last)
+
+            #is_duplicate = check_new_route_is_duplicate(new_nodes, routes)
+            #if is_duplicate:
+            #    logger.info("New route is a duplicate. Skipping.")
+            #    return mr.ModelSuccess.NO_NEW_ROUTE, routes
 
             pickup_stops_students = {}
             for i in N_H:
@@ -419,6 +431,11 @@ def pricing_problem(
             )
 
             return mr.ModelSuccess.SUCCESS, routes
+        
+        elif sp.status == GRB.TIME_LIMIT:
+            # Hit limit with no feasible solution found at all
+            logger.warning("Pricing subproblem hit time limit with no incumbent.")
+            return mr.ModelSuccess.TIME_LIMIT, None
 
         else:
             logger.info("No negative reduced-cost route found.")

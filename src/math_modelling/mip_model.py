@@ -3,6 +3,7 @@ from datetime import datetime
 from module.input_model import InputModel
 from module.sucess_result import ModelSuccess
 from module.route import Route
+from module.stop_point import Stop
 import math
 
 import logging
@@ -10,6 +11,8 @@ import gurobipy as gp
 from gurobipy import GRB
 
 from dataclasses import dataclass
+
+from helper.distance_calculator import compute_distance_two_points
 
 
 @dataclass
@@ -26,6 +29,13 @@ class DecisionVar:
         self.z = z
 
 
+def compute_route_distance(stops: list[Stop], distance_matrix: dict) -> float:
+    return sum(
+        distance_matrix[(stops[i].second_id, stops[i + 1].second_id)]
+        for i in range(len(stops) - 1)
+    )
+
+
 def _build_route_solution(
     sp: gp.Model,
     input_model: InputModel,
@@ -40,9 +50,9 @@ def _build_route_solution(
 
     logger.info(f"Main problem objective : {sp.objVal}")
     final_route: list[Route] = []
-    routes = {}
+    routes: dict[int, list[Stop]] = {}
     for k in range(K):
-        new_nodes = [0]
+        new_nodes = [input_model.first_depot]
         current = 0
         while True:
             found = False
@@ -57,9 +67,12 @@ def _build_route_solution(
                     break
             if not found or next_node == 0:
                 break
-            new_nodes.append(next_node)
+            next_stop: Stop = next(
+                s for s in input_model.all_stops if s.second_id == next_node
+            )
+            new_nodes.append(next_stop)
             current = next_node
-        new_nodes.append(input_model.last_depot.second_id)  # 0)
+        new_nodes.append(input_model.last_depot)
         routes[k] = new_nodes
 
     for k in range(K):
@@ -84,14 +97,19 @@ def _build_route_solution(
             if decision_var.x[i, j, k].X > 0.5
         )
 
-        logger.info(
-            f"New route nodes:{routes[k]} covered_students: {[s.second_id for s in covered_students]}- total walking distance:{route_cost}- total distance:{total_distance}"
+        total_distance_cal = compute_route_distance(
+            routes[k], input_model.distance_matrix
         )
+
         result_route = Route(
             stops=routes[k],
             served_students=[s.second_id for s in covered_students],
             total_distance=total_distance,
             total_walking_distance=route_cost,
+        )
+
+        logger.info(
+            f"New route nodes:{str(result_route)} covered_students: {result_route.served_students}- total walking distance:{route_cost}- total distance:{total_distance}-? total cal distance :{total_distance_cal}"
         )
 
         final_route.append(result_route)
@@ -195,7 +213,7 @@ def _build_decision_variables(sp: gp.Model, problem_model: InputModel) -> Decisi
     u = {}
     for s in S_ids:
         for k in range(K):
-            u[s, k] = sp.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=Q - 1, name=f"u_{s}_{k}")
+            u[s, k] = sp.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=Q, name=f"u_{s}_{k}")
 
     z = {}
     for i in N_H:
@@ -205,7 +223,12 @@ def _build_decision_variables(sp: gp.Model, problem_model: InputModel) -> Decisi
     return DecisionVar(x=x, x_hat=x_hat, u=u, z=z)
 
 
-def main_problem(problem_model: InputModel, logger: logging.Logger):
+def main_problem(
+    problem_model: InputModel,
+    logger: logging.Logger,
+    time_limit: int = 1800,
+    decision_var_minmax = None,
+):
     K = problem_model.number_of_vehicles
     max_route_distance = problem_model.max_travel_distance
     d = problem_model.distance_matrix
@@ -224,16 +247,20 @@ def main_problem(problem_model: InputModel, logger: logging.Logger):
 
     sp = _build_constraints(sp, decision_var, problem_model)
 
+    if decision_var_minmax:
+        apply_warm_start(decision_var, decision_var_minmax)
+
     sp.addConstrs(
         gp.quicksum(d[i, j] * x[i, j, k] for i in N_H for j in N_H if i != j)
         <= max_route_distance
         for k in range(K)
     )
 
-    obj = gp.quicksum(W[i] * z[i, k] for i in N_H for k in range(K))
+    obj = gp.quicksum(W[i] * z[i, k] for i in N_H for k in range(K) if i != 0)
     sp.setObjective(obj, GRB.MINIMIZE)
 
-    sp.params.TimeLimit = 1800
+    sp.Params.MIPFocus = 1
+    sp.params.TimeLimit = time_limit
     sp.params.OutputFlag = 0
 
     start_time = datetime.now()
@@ -254,10 +281,11 @@ def main_problem(problem_model: InputModel, logger: logging.Logger):
         lb = sp.ObjBound  # best proven lower bound
         gap = sp.MIPGap  # relative gap = (UB-LB)/|UB|
         logger.warning(f"Time limit hit. LB={lb:.4f}, UB={ub:.4f}, gap={gap:.2%}")
+        print(f"Time limit hit. LB={lb:.4f}, UB={ub:.4f}, gap={gap:.2%}")
 
         if sp.SolCount > 0:
             final_route = _build_route_solution(sp, problem_model, decision_var, logger)
-            return ModelSuccess.INFEASIBLE, final_route
+            return ModelSuccess.TIME_LIMIT, final_route
         else:
             return ModelSuccess.INFEASIBLE, None
     else:
@@ -307,7 +335,9 @@ def shotest_path(problem_model: InputModel, logger: logging.Logger):
         return ModelSuccess.INFEASIBLE, None
 
 
-def minmax_problem(problem_model: InputModel, logger: logging.Logger):
+def minmax_problem(
+    problem_model: InputModel, logger: logging.Logger, time_limit: int = 1800
+):
     K = problem_model.number_of_vehicles
     d = problem_model.distance_matrix
     N_H = problem_model.all_stop_ids[:-1]
@@ -323,10 +353,6 @@ def minmax_problem(problem_model: InputModel, logger: logging.Logger):
     TMAX = sp.addVar(lb=0, vtype=GRB.CONTINUOUS)
     sp = _build_constraints(sp, decision_var, problem_model)
 
-    # obj = gp.quicksum(
-    #    d[i, j] * x[i, j, k] for i in N_H for j in N_H if i != j for k in range(K)
-    # )
-
     for k in range(K):
         sp.addConstr(
             gp.quicksum(d[i, j] * x[i, j, k] for i in N_H for j in N_H if i != j)
@@ -335,12 +361,10 @@ def minmax_problem(problem_model: InputModel, logger: logging.Logger):
 
     sp.setObjective(TMAX, GRB.MINIMIZE)
 
-    sp.params.TimeLimit = 1800
+    sp.params.TimeLimit = time_limit
     sp.params.OutputFlag = 0
 
     start_time = datetime.now()
-    #sp.write("model.lp")
-    # sp.relax()
     sp.optimize()
 
     end_time = datetime.now()
@@ -352,7 +376,58 @@ def minmax_problem(problem_model: InputModel, logger: logging.Logger):
 
         final_route = _build_route_solution(sp, problem_model, decision_var, logger)
 
-        return ModelSuccess.SUCCESS, final_route
+        return (
+            ModelSuccess.SUCCESS,
+            final_route,
+            sp,
+            decision_var,
+        )
+        # return ModelSuccess.SUCCESS, final_route
+    elif sp.status == GRB.TIME_LIMIT:
+        ub = sp.ObjVal if sp.SolCount > 0 else math.inf  # best feasible solution found
+        lb = sp.ObjBound  # best proven lower bound
+        gap = sp.MIPGap  # relative gap = (UB-LB)/|UB|
+        logger.warning(f"Time limit hit. LB={lb:.4f}, UB={ub:.4f}, gap={gap:.2%}")
+        print(f"Time limit hit. LB={lb:.4f}, UB={ub:.4f}, gap={gap:.2%}")
+
+        if sp.SolCount > 0:
+            final_route = _build_route_solution(sp, problem_model, decision_var, logger)
+            return (
+                ModelSuccess.INFEASIBLE,
+                final_route,
+                sp,
+                decision_var,
+            )
+        else:
+            return ModelSuccess.INFEASIBLE, None, sp, decision_var
     else:
         logger.warning(f"Subproblem not optimal or infeasible; status: {sp.status}")
-        return ModelSuccess.INFEASIBLE, None
+        return ModelSuccess.INFEASIBLE, None, sp, decision_var
+
+
+def apply_warm_start(target_dec: DecisionVar, source_dec: DecisionVar):
+    # x
+    for key, var in target_dec.x.items():
+        if key in source_dec.x and source_dec.x[key].X is not None:
+            var.Start = source_dec.x[key].X
+        else:
+            var.Start = 0.0
+
+    # x_hat
+    for key, var in target_dec.x_hat.items():
+        if key in source_dec.x_hat and source_dec.x_hat[key].X is not None:
+            var.Start = source_dec.x_hat[key].X
+        else:
+            var.Start = 0.0
+
+    # z
+    for key, var in target_dec.z.items():
+        if key in source_dec.z and source_dec.z[key].X is not None:
+            var.Start = source_dec.z[key].X
+        else:
+            var.Start = 0.0
+
+    # u
+    for key, var in target_dec.u.items():
+        if key in source_dec.u and source_dec.u[key].X is not None:
+            var.Start = source_dec.u[key].X

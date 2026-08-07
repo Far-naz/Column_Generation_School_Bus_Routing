@@ -12,16 +12,22 @@ import logging
 from datetime import datetime
 
 
-def main() -> None:
+def main_exact(number_of_vehicles,
+    capacity_of_vehicle,
+    max_travel_distance,
+    allowed_walking_distance,
+    school_id,
+    data_source= DataSource.REAL) -> None| list[Route]:
+    
     mip_model = False
     shortest_path_problem = False
     problem_model = InputModel(
-        number_of_vehicles=2,
-        capacity_of_vehicle=10,
-        max_travel_distance=111.0,
-        data_source=DataSource.REAL,
-        allowed_walking_distance=1.5,
-        school_id=33337,
+        number_of_vehicles=number_of_vehicles,
+        capacity_of_vehicle=capacity_of_vehicle,
+        max_travel_distance=max_travel_distance,
+        data_source=data_source,
+        allowed_walking_distance=allowed_walking_distance,
+        school_id=school_id,
     )
     model_info = (
         f"[S={len(problem_model.students)}"
@@ -37,16 +43,18 @@ def main() -> None:
         if shortest_path_problem:
             logger = setup_logger(f"milp_model_shortest_path_{model_info}")
 
-            result, routes = minmax_problem(problem_model, logger)
+            result_1, routes_1, sp, var = minmax_problem(problem_model, logger, time_limit= 3600)
+            result, routes = main_problem(problem_model, logger, 3600, var)
         else:
             logger = setup_logger(f"milp_model_{model_info}")
 
-            result, routes = main_problem(problem_model, logger)
+            result, routes = main_problem(problem_model, logger, time_limit= 3600)
 
         if result == ModelSuccess.SUCCESS and routes:
             print(
                 f"total route distance: {sum(r.total_distance for r in routes)}, total walking distance: {sum(r.total_walking_distance for r in routes)}"
             )
+            return routes
         else:
             print("Model did not find a successful solution.")
 
@@ -89,12 +97,17 @@ def main() -> None:
                 f'total route distance: {sum(r.total_distance for r in polished_routes) if polished_routes else "N/A"}, total walking distance: {sum(r.total_walking_distance for r in polished_routes) if polished_routes else "N/A"}'
             )
 
+            return final_routes
+
 
 if __name__ == "__main__":
-    main()
+    main_exact(2, 100, 18.80, 0.7, 42539)
 
 
-# 25: 42539, 75: 33231, 89: 42373, 120: 33243,10: 33337
+
+
+
+# 18: 42539,25: 40755,10: 33337
 
 #TODO
 '''

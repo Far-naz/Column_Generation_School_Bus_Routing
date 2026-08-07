@@ -1,13 +1,10 @@
-from branch_and_price.models import (
-    restricted_master_problem,
-    pricing_problem,
-)
-from module.result_model import RMPResult
-from module.sucess_result import ModelSuccess
-from module.input_model import InputModel
-from module.route import Route
-import logging
+from __future__ import annotations
 
+import copy
+import logging
+from dataclasses import dataclass
+
+from branch_and_price.models import restricted_master_problem, pricing_problem
 from branch_and_price.pricing_heuristic import (
     add_single_route_to_master,
     generate_routes,
@@ -18,8 +15,14 @@ from branch_and_price.branch_and_bound import (
     choose_branch_pair_from_fractional_solution,
 )
 from module.branch import BranchRule, BPNode
-import copy
-from dataclasses import dataclass
+from module.input_model import InputModel
+from module.result_model import RMPResult
+from module.route import Route
+from module.sucess_result import ModelSuccess
+
+
+EPS = 1e-9
+INT_EPS = 1e-6
 
 
 @dataclass
@@ -29,6 +32,39 @@ class ColumnGenerationResult:
     rmp: RMPResult | None
     result_mode: ModelSuccess
     integer_found: bool
+
+
+def _count_selected_integer_routes(
+    routes: list[Route], lambda_values: list[float] | None
+) -> int:
+    """Count non-dummy routes whose master variable is essentially 1.0.
+
+    The count must always be done against the exact route list used to solve
+    the current master problem, otherwise lambda values can become misaligned
+    after routes are filtered or extended.
+    """
+    if not routes or not lambda_values:
+        return 0
+
+    return sum(
+        1
+        for route, val in zip(routes, lambda_values)
+        if abs(val - 1.0) <= INT_EPS and not getattr(route, "is_dummy", False)
+    )
+
+NO_IMPROVING_COLUMN = {ModelSuccess.NO_NEW_ROUTE, ModelSuccess.NO_NEGATIVE_ROUTE}
+
+
+def _dummy_lambda_active(routes, lambda_values, tol=INT_EPS):
+    """True if the dummy/artificial route still carries positive mass in
+    the RMP solution — i.e. some student is only 'covered' by the
+    artificial slack, not by any real route."""
+    if not routes or not lambda_values:
+        return False
+    return any(
+        getattr(route, "is_dummy", False) and val > tol
+        for route, val in zip(routes, lambda_values)
+    )
 
 
 class ColumnGenerationSolver:
@@ -47,163 +83,197 @@ class ColumnGenerationSolver:
         self.is_heuristic = is_heuristic
 
     def run(self, routes: list[Route]) -> ColumnGenerationResult:
-        print(f"Starting column generation loop with {len(routes)} initial routes.")
+        self.logger.info("Starting column generation loop with %s initial routes.", len(routes))
+
         if len(routes) == 0:
             self.logger.info("No initial routes provided. Ending column generation.")
             return ColumnGenerationResult(
-                success=False,
-                routes=routes,
-                rmp=None,
-                result_mode=ModelSuccess.INFEASIBLE,
-                integer_found=False,
+                success=False, routes=routes, rmp=None,
+                result_mode=ModelSuccess.INFEASIBLE, integer_found=False,
             )
 
-        routes = filter_routes_by_branch_rules(copy.deepcopy(routes), self.branch_rules)
+        dummy = routes[0]
+        filtered = filter_routes_by_branch_rules(routes[1:], self.branch_rules)
+        routes = [dummy] + filtered
+
         result_mode = ModelSuccess.SUCCESS
         last_rmp = None
 
         for it in range(self.max_iter):
-            self.logger.info(f"--- Iteration {it + 1} ---")
+            self.logger.info("--- Iteration %s ---", it + 1)
             self.logger.info(
-                f"Branch rules: {[(r.student_a, r.student_b, r.mode) for r in self.branch_rules]}"
+                "Branch rules: %s",
+                [(r.student_a, r.student_b, r.mode) for r in self.branch_rules],
             )
 
+            master_routes = copy.deepcopy(routes)
             rmp: RMPResult = restricted_master_problem(
-                routes=copy.deepcopy(routes),
-                problem_model=self.problem_model,
-                logger=self.logger,
-                branch_rules=self.branch_rules,
-                return_full=True,
+                routes=master_routes, problem_model=self.problem_model,
+                logger=self.logger, branch_rules=self.branch_rules, return_full=True,
             )
 
             if not rmp.success:
                 self.logger.info("RMP not optimal.")
                 return ColumnGenerationResult(
-                    success=False,
-                    routes=routes,
-                    rmp=rmp,
-                    result_mode=ModelSuccess.INFEASIBLE,
-                    integer_found=False,
+                    success=False, routes=routes, rmp=rmp,
+                    result_mode=ModelSuccess.INFEASIBLE, integer_found=False,
                 )
 
             last_rmp = rmp
             pi, mu = rmp.pi, rmp.mu
+            routes_before = copy.deepcopy(routes)
+            column_added = False
 
-            if it > 0 and rmp.is_integer:
-                int_lambda_count = sum(
-                    1 for val in rmp.lambda_values if abs(val - 1.0) <= 1e-6
+            # True only when EXACT pricing itself reports NO_NEGATIVE_ROUTE —
+            # i.e. a genuine certificate that no improving column exists.
+            # A heuristic failure, or a branch-filter rejection of an exact
+            # column, does NOT count as a certificate.
+            certified_no_column = False
+
+            if all(abs(v) <= EPS for v in pi.values()) and abs(mu) <= EPS:
+                self.logger.warning(
+                    "All duals and mu are ~0. The master is degenerate; pricing is still required."
                 )
-                if int_lambda_count <= self.problem_model.number_of_vehicles:
-                    self.logger.info("Integer solution found!")
-                    return ColumnGenerationResult(
-                        success=True,
-                        routes=routes,
-                        rmp=rmp,
-                        result_mode=ModelSuccess.SUCCESS,
-                        integer_found=True,
-                    )
 
             if self.is_heuristic:
-                routes_before = copy.deepcopy(routes)
-                heuristic_mode = ModelSuccess.SUCCESS
-
+                # ---- Step 1: heuristic pricing ----
                 if it == 0:
                     before_count = len(routes)
                     routes = add_single_route_to_master(
                         routes, self.problem_model, pi, mu, self.logger
                     )
                     heuristic_mode = (
-                        ModelSuccess.SUCCESS
-                        if len(routes) > before_count
+                        ModelSuccess.SUCCESS if len(routes) > before_count
                         else ModelSuccess.NO_NEW_ROUTE
                     )
                 else:
                     heuristic_mode, routes = generate_routes(
-                        routes, self.problem_model, pi, mu, rmp.lambda_values, self.logger
+                        routes, self.problem_model, pi, mu, rmp.lambda_values, self.logger,
                     )
 
-                routes = keep_only_branch_feasible_new_routes(
-                    routes_before, routes, self.branch_rules, self.logger
-                )
+                if self.branch_rules:
+                    routes = keep_only_branch_feasible_new_routes(
+                        routes_before, routes, self.branch_rules, self.logger
+                    )
 
-                if heuristic_mode != ModelSuccess.SUCCESS:
+                if heuristic_mode == ModelSuccess.SUCCESS and len(routes) > len(routes_before):
+                    result_mode = ModelSuccess.SUCCESS
+                    column_added = True
+                else:
+                    # ---- Step 2: heuristic found nothing usable -> exact fallback ----
                     self.logger.info(
-                        "Heuristic pricing could not find a new route. Trying exact pricing fallback."
+                        "Heuristic pricing found no usable route. Falling back to exact pricing."
                     )
+                    routes = routes_before
 
                     result_mode, exact_routes = pricing_problem(
-                        pi=pi,
-                        mu=mu,
-                        problem_model=self.problem_model,
-                        routes=routes,
-                        logger=self.logger,
+                        pi=pi, mu=mu, problem_model=self.problem_model,
+                        routes=copy.deepcopy(master_routes), logger=self.logger,
                         branch_rules=self.branch_rules,
                     )
 
-                    if exact_routes is not None:
-                        routes = keep_only_branch_feasible_new_routes(
-                            routes_before, exact_routes, self.branch_rules, self.logger
+                    if result_mode == ModelSuccess.SUCCESS and exact_routes is not None:
+                        candidate_routes = (
+                            keep_only_branch_feasible_new_routes(
+                                routes_before, exact_routes, self.branch_rules, self.logger
+                            )
+                            if self.branch_rules else exact_routes
+                        )
+                        if len(candidate_routes) > len(routes_before):
+                            routes = candidate_routes
+                            column_added = True
+                        else:
+                            # Branch filter rejected the exact column — treat as
+                            # "no usable column" but NOT as a certificate.
+                            result_mode = ModelSuccess.NO_NEW_ROUTE
+                            routes = routes_before
+
+                    elif result_mode == ModelSuccess.TIME_LIMIT:
+                        self.logger.warning("Exact pricing hit time limit. Cannot certify optimality.")
+                        return ColumnGenerationResult(
+                            success=True, routes=routes_before, rmp=rmp,
+                            result_mode=ModelSuccess.TIME_LIMIT, integer_found=False,
                         )
 
-                    if result_mode == ModelSuccess.SUCCESS:
-                        self.logger.info(
-                            "Exact pricing fallback found a route. Continuing with heuristic pricing."
+                    elif result_mode == ModelSuccess.INFEASIBLE:
+                        self.logger.error("Exact pricing subproblem failed to solve (status error).")
+                        return ColumnGenerationResult(
+                            success=False, routes=routes_before, rmp=rmp,
+                            result_mode=ModelSuccess.INFEASIBLE, integer_found=False,
                         )
+
                     else:
-                        self.logger.info(
-                            f"Exact pricing fallback did not find a route ({result_mode})."
-                        )
-                else:
-                    result_mode = ModelSuccess.SUCCESS
+                        # NO_NEGATIVE_ROUTE — a genuine certificate.
+                        certified_no_column = True
+                        routes = routes_before
 
             else:
+                # ---- Exact pricing only (branch-and-price nodes) ----
                 result_mode, candidate_routes = pricing_problem(
-                    pi=pi,
-                    mu=mu,
-                    problem_model=self.problem_model,
-                    routes=routes,
-                    logger=self.logger,
+                    pi=pi, mu=mu, problem_model=self.problem_model,
+                    routes=copy.deepcopy(master_routes), logger=self.logger,
                     branch_rules=self.branch_rules,
                 )
-                routes = candidate_routes if candidate_routes is not None else routes
 
-            if result_mode != ModelSuccess.SUCCESS:
-                if (
-                    self.is_heuristic == False
-                    and rmp.obj_value > self.problem_model.upper_bound
-                    and len(rmp.lambda_values) > 0
-                    and rmp.lambda_values[0] > 0
-                ):
+                if result_mode == ModelSuccess.SUCCESS and candidate_routes is not None:
+                    if len(candidate_routes) > len(routes_before):
+                        routes = candidate_routes
+                        column_added = True
+                    else:
+                        result_mode = ModelSuccess.NO_NEW_ROUTE
+
+                elif result_mode == ModelSuccess.TIME_LIMIT:
+                    self.logger.warning("Exact pricing hit time limit. Cannot certify optimality.")
+                    return ColumnGenerationResult(
+                        success=True, routes=routes_before, rmp=rmp,
+                        result_mode=ModelSuccess.TIME_LIMIT, integer_found=False,
+                    )
+
+                elif result_mode == ModelSuccess.INFEASIBLE:
+                    self.logger.error("Exact pricing subproblem failed to solve (status error).")
+                    return ColumnGenerationResult(
+                        success=False, routes=routes_before, rmp=rmp,
+                        result_mode=ModelSuccess.INFEASIBLE, integer_found=False,
+                    )
+
+                else:
+                    certified_no_column = True
+
+            # ---- Single, unified termination check ----
+            if result_mode in NO_IMPROVING_COLUMN:
+                if certified_no_column and _dummy_lambda_active(master_routes, rmp.lambda_values):
                     self.logger.warning(
-                        f"This problem is probably infeasible. obj:{rmp.obj_value}, route_0:{rmp.lambda_values[0]}, upper_bound:{self.problem_model.upper_bound}"
+                        "Exact pricing certifies no improving column exists, but the "
+                        "dummy route is still active (obj=%s) — this node is infeasible.",
+                        rmp.obj_value,
                     )
                     return ColumnGenerationResult(
-                        success=False,
-                        routes=routes,
-                        rmp=rmp,
-                        result_mode=ModelSuccess.INFEASIBLE,
-                        integer_found=False,
+                        success=False, routes=routes, rmp=rmp,
+                        result_mode=ModelSuccess.INFEASIBLE, integer_found=False,
                     )
-                self.logger.info(
-                    f"Column generation stopped with result mode {result_mode}"
-                )
+
+                int_lambda_count = _count_selected_integer_routes(master_routes, rmp.lambda_values)
+                if rmp.is_integer and int_lambda_count <= self.problem_model.number_of_vehicles:
+                    self.logger.info("Optimal integer solution found after pricing convergence.")
+                    return ColumnGenerationResult(
+                        success=True, routes=routes, rmp=rmp,
+                        result_mode=ModelSuccess.SUCCESS, integer_found=True,
+                    )
+
+                self.logger.info("Column generation converged but solution is fractional.")
                 return ColumnGenerationResult(
-                    success=True,
-                    routes=routes,
-                    rmp=rmp,
-                    result_mode=result_mode,
-                    integer_found=False,
+                    success=True, routes=routes, rmp=rmp,
+                    result_mode=ModelSuccess.NO_NEW_ROUTE, integer_found=False,
                 )
 
-        self.logger.info(f"Reached maximum iterations: {self.max_iter}")
+            # Otherwise a column was added — loop continues, re-solving the RMP.
+
+        self.logger.info("Reached maximum iterations: %s", self.max_iter)
         return ColumnGenerationResult(
             success=last_rmp is not None and last_rmp.success,
-            routes=routes,
-            rmp=last_rmp,
-            result_mode=result_mode,
+            routes=routes, rmp=last_rmp, result_mode=result_mode,
             integer_found=last_rmp.is_integer if last_rmp else False,
         )
-
 
 def column_generation_loop(
     problem_model: InputModel,
@@ -229,21 +299,24 @@ def branch_and_price_dfs(
     logger,
     preferred_pair=None,
     max_depth=20,
+    initial_upper_bound=float("inf"),
 ):
     best_routes = None
-    best_obj = float("inf")
+    best_obj = initial_upper_bound
     next_node_id = 0
 
     def dfs(node: BPNode):
         nonlocal best_routes, best_obj, next_node_id
 
         logger.info(
-            f"Entering node {node.node_id}, depth={node.depth}, "
-            f"rules={[(r.student_a, r.student_b, r.mode) for r in node.branch_rules]}"
+            "Entering node %s, depth=%s, rules=%s",
+            node.node_id,
+            node.depth,
+            [(r.student_a, r.student_b, r.mode) for r in node.branch_rules],
         )
 
         if node.depth > max_depth:
-            logger.info(f"Max depth reached at node {node.node_id}")
+            logger.info("Max depth reached at node %s", node.node_id)
             return False
 
         cg_result = column_generation_loop(
@@ -261,7 +334,8 @@ def branch_and_price_dfs(
         if not cg_result.success or rmp is None or not rmp.success:
             return False
 
-        if rmp.obj_value >= best_obj - 1e-6:
+        # Prune only against a valid incumbent integer solution.
+        if best_routes is not None and rmp.obj_value >= best_obj - 1e-6:
             return False
 
         if cg_result.integer_found:
@@ -269,29 +343,37 @@ def branch_and_price_dfs(
             best_routes = copy.deepcopy(node_routes)
             return True
 
-        a, b = choose_branch_pair_from_fractional_solution(
+        branch_pair = choose_branch_pair_from_fractional_solution(
+            logger,
             rmp.routes,
             preferred_pair=preferred_pair,
         )
+        if branch_pair is None:
+            return False
+
+        a, b = branch_pair
+
+        left_id = next_node_id + 1
+        right_id = next_node_id + 2
+        next_node_id += 2
 
         left = BPNode(
-            node_id=next_node_id + 1,
+            node_id=left_id,
             depth=node.depth + 1,
             branch_rules=node.branch_rules + [BranchRule(a, b, "together")],
             routes=copy.deepcopy(node_routes),
         )
-        print("left node created with rule: together", a, b)
 
         right = BPNode(
-            node_id=next_node_id + 2,
+            node_id=right_id,
             depth=node.depth + 1,
             branch_rules=node.branch_rules + [BranchRule(a, b, "separate")],
             routes=copy.deepcopy(node_routes),
         )
 
-        next_node_id += 2
-
-        return dfs(left) or dfs(right)
+        found_left = dfs(left)
+        found_right = dfs(right)
+        return found_left or found_right
 
     root = BPNode(
         node_id=0,
@@ -308,9 +390,7 @@ def branch_and_price_dfs(
     return ModelSuccess.INFEASIBLE, routes, False
 
 
-def main_column_generation(
-    problem_model, initial_routes: list[Route], logger
-) -> list[Route]:
+def main_column_generation(problem_model, initial_routes: list[Route], logger) -> list[Route]:
     routes = copy.deepcopy(initial_routes)
 
     cg_result = column_generation_loop(
@@ -330,10 +410,14 @@ def main_column_generation(
         "Heuristic column generation did not finish integrally. Starting branch-and-price."
     )
 
+    # Do not use an LP relaxation value as an incumbent upper bound.
+    initial_ub = float("inf")
+
     dfs_result_mode, best_routes, dfs_success = branch_and_price_dfs(
         routes=cg_result.routes,
         problem_model=problem_model,
         logger=logger,
+        initial_upper_bound=initial_ub,
     )
 
     if dfs_success or dfs_result_mode == ModelSuccess.SUCCESS:

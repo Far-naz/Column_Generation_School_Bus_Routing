@@ -16,8 +16,9 @@ def route_respects_branch_rules(route: Route, branch_rules: list[BranchRule]) ->
         has_b = b in served
 
         if rule.mode == "together":
-            if not (has_a == has_b):
-                return False
+            pass
+            #if not (has_a == has_b):
+            #    return False
 
         elif rule.mode == "separate":
             if has_a and has_b:
@@ -35,10 +36,11 @@ def filter_routes_by_branch_rules(routes: list[Route], branch_rules: list[Branch
 
 
 def choose_branch_pair_from_fractional_solution(
+    logger,
     routes: list[Route],
     preferred_pair: Optional[Tuple[int, int]] = None,
-    dummy_route_index: int = 0,
-) -> Tuple[int, int]:
+    
+) -> Tuple[int, int] | None:
     if preferred_pair is not None:
         return preferred_pair
 
@@ -47,7 +49,7 @@ def choose_branch_pair_from_fractional_solution(
 
     for route_idx, route in enumerate(routes):
         # Skip dummy route
-        if route_idx == dummy_route_index:
+        if getattr(route, "is_dummy", False):
             continue
 
         lam = getattr(route, "lambda_value", 0.0)
@@ -63,7 +65,9 @@ def choose_branch_pair_from_fractional_solution(
                     pair_count[pair] = pair_count.get(pair, 0) + 1
 
     if not pair_score:
-        raise RuntimeError("No fractional pair found for branching.")
+        logger.info("No fractional pair found — all fractional routes are single-student. Pruning node.")
+        return None
+        #raise RuntimeError("No fractional pair found for branching.")
 
     # Prefer pairs that appear in more than one fractional route
     candidates = [p for p in pair_score if pair_count[p] >= 2]
@@ -78,6 +82,8 @@ def choose_branch_pair_from_fractional_solution(
 # -------------------------------------------------------------------
 # Route post-processing after pricing / heuristics
 # -------------------------------------------------------------------
+def _route_key(route: Route) -> tuple:
+    return tuple(sorted(route.served_students))
 
 def keep_only_branch_feasible_new_routes(
     old_routes,
@@ -89,13 +95,15 @@ def keep_only_branch_feasible_new_routes(
     Keeps all old routes, but among newly generated routes only retains
     those satisfying current branch rules.
     """
-    old_ids = set(id(r) for r in old_routes)
-
+    dummy_key = _route_key(old_routes[0]) 
+    old_keys = set(_route_key(r) for r in old_routes)
+    
     result = []
     removed = 0
 
     for r in new_routes:
-        if id(r) in old_ids:
+        key = _route_key(r)
+        if key == dummy_key or key in old_keys:
             result.append(r)
         else:
             if route_respects_branch_rules(r, branch_rules):
