@@ -76,6 +76,33 @@ If heuristic pricing cannot produce a route, exact pricing is attempted as fallb
 - If exact pricing succeeds, the process continues.
 - If exact pricing also fails, the run is flagged/stopped by result mode.
 
+## Dual-variable history and oscillation
+
+Every successful restricted-master solve records the coverage duals (`pi`),
+the vehicle-limit dual (`mu`), the RMP objective, and the iteration number on
+the returned column-generation result. The trace can be analyzed in memory or
+stored as a long-format CSV file:
+
+```python
+result = column_generation_loop(problem_model, routes, logger)
+
+metrics = result.dual_history.analyze()
+print(metrics["mu"])
+print(metrics["pi[42]"])
+
+result.dual_history.to_csv("dual_history.csv")
+```
+
+For each dual, the analysis reports its range, standard deviation, total and
+mean absolute movement, direction-change count, and oscillation rate. The rate
+is the fraction of possible direction reversals that actually occur after
+changes smaller than the numerical tolerance are ignored. A value near `1.0`
+therefore indicates repeated up/down movement; a monotone sequence has `0.0`.
+
+Note that the route-selection variables named `lambda` in the master problem
+are primal variables. This history intentionally tracks the true RMP duals
+`pi` and `mu`.
+
 
 ## Notes
 

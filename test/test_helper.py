@@ -1,8 +1,9 @@
-from module.route import Route
-from module.label_setting_point import Stop
-
-from heuristic.helper import duplicate_students_in_routes
 '''
+from src.module.route import Route
+from src.module.label_setting_point import Stop
+
+from src.heuristic.helper import duplicate_students_in_routes
+
 route1 = Route(
     stops=[
         Stop(Id=0, is_depot=True, is_student=False, second_idx=0, is_covered = False),
