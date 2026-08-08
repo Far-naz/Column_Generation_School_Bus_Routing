@@ -176,7 +176,7 @@ def pricing_problem(
         (rule.student_a, rule.student_b, rule.mode) for rule in branch_rules
     )
     cache_key = (id(problem_model), branch_signature)
-    cached_model = None  # _PRICING_MODEL_CACHE.get(cache_key)
+    cached_model = _PRICING_MODEL_CACHE.get(cache_key)
 
     N_H = problem_model.all_stop_ids[:-1]
     S = problem_model.students
