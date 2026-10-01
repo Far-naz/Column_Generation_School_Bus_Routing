@@ -3,6 +3,7 @@ from module.route import Route
 from module.input_model import InputModel
 from module.sucess_result import ModelSuccess
 import logging
+from dataclasses import dataclass, field
 
 
 def check_new_route_is_duplicate(
@@ -67,6 +68,7 @@ def create_route_with_single_student(
             total_distance=total_route_distance,
             total_walking_distance=best_walking_distance,
             served_students=[student.second_id],
+            pickup_map={student.second_id: best_stop.second_id},
         )
     return None
 
@@ -83,392 +85,279 @@ def add_single_route_to_master(
         )
         if route is not None:
             route.cost = route.total_walking_distance - pi[student.second_id] - mu
+            route.source = "init_single"
             _add_route_to_master(route, init_routes, logger)
 
     return init_routes
 
 
-def _find_best_location_to_insert_stop_to_route(
-    route: Route,
-    new_stop: Stop,
-    problem_model: InputModel,
-):
-    """Insert a new stop into the existing route at the best position."""
-    # print(f"Trying to insert stop {new_stop.second_id} into route with stops {[s.second_id for s in route.stops]}")
-    best_distance = float("inf")
-
-    curr_distance = route.total_distance
-
-    best_candidate_stop = None
-    best_location = -1
-
-    for i in range(1, len(route.stops)):
-        if (
-            new_stop.second_id is None
-            or route.stops[i].second_id is None
-            or route.stops[i - 1].second_id is None
-        ):
-            continue
-        if (
-            new_stop.second_id == route.stops[i].second_id
-            or new_stop.second_id == route.stops[i - 1].second_id
-        ):
-            continue
-        new_distance = (
-            curr_distance
-            - problem_model.distance_matrix[
-                (route.stops[i - 1].second_id, route.stops[i].second_id)
-            ]
-            + problem_model.distance_matrix[
-                (route.stops[i - 1].second_id, new_stop.second_id)
-            ]
-            + problem_model.distance_matrix[
-                (new_stop.second_id, route.stops[i].second_id)
-            ]
-        )
-
-        if (
-            new_distance < best_distance
-            and new_distance <= problem_model.max_travel_distance
-        ):
-            best_distance = new_distance
-            best_location = i
-            best_candidate_stop = new_stop
-
-    if best_candidate_stop is not None:
-        return best_candidate_stop, best_location, best_distance
-    else:
-        return None, -1, 0
+# ---------------------------------------------------------------------------
+# Heuristic pricing
+#
+# Goal: find routes with negative reduced cost
+#       sum_i W[stop_i] - sum_s pi_s - mu   (mu <= 0)
+# Every stop node belongs to exactly one student (covering stops are
+# per-student copies), so a route is a tour plus one pickup node per student.
+#
+# Dominance used throughout: a student whose pi_s is not larger than the
+# walking distance of its cheapest stop can only increase the reduced cost, so
+# it is never worth serving.
+# ---------------------------------------------------------------------------
+RC_TOL = 1e-6
+GAIN_EPS = 1e-9
+MAX_NEW_COLUMNS = 10
+N_SEEDS = 8
+MAX_IMPROVE_ROUNDS = 20
 
 
-def best_pickup_for_student(
-    problem_model: InputModel,
-    student: Student,
-    route: Route,
-    pi: dict[int, float],
-    mu: float,
-) -> Route | None:
-    if pi is None or student.second_id not in pi:
-        return None
+@dataclass
+class _State:
+    """A route under construction: tour (incl. both depots) + student -> node."""
 
-    selected_pickup_points = sorted(
-        [cs for cs in student.covering_stops if cs.second_id is not None],
-        key=lambda s: problem_model.walking_distance_list[s.second_id],
+    nodes: list[Stop]
+    assign: dict[int, Stop] = field(default_factory=dict)
+    dist: float = 0.0
+
+
+def _empty_state(pm: InputModel) -> _State:
+    d = pm.distance_matrix
+    return _State(
+        nodes=[pm.first_depot, pm.last_depot],
+        dist=d[(pm.first_depot.second_id, pm.last_depot.second_id)],
     )
 
-    for stop in selected_pickup_points:
-        candidate_stop, location, distance = (
-            _find_best_location_to_insert_stop_to_route(route, stop, problem_model)
-        )
-        if candidate_stop is not None and candidate_stop.second_id is not None:
-            new_stops = route.stops[:location] + [candidate_stop] + route.stops[location:]
-            new_walking_distance = (
-                route.total_walking_distance
-                + problem_model.walking_distance_list[candidate_stop.second_id]
-            )
-            served_students = set(route.served_students) | {student.second_id}
-            new_cost = (
-                new_walking_distance
-                - sum(pi[s] for s in served_students if s in pi)
-                - mu
-            )
 
-            # Carry forward existing pickup_map and add new student→stop mapping
-            new_pickup_map = {
-                **getattr(route, "pickup_map", {}),
-                student.second_id: candidate_stop.second_id,
-            }
-
-            new_route = Route(
-                stops=new_stops,
-                total_distance=distance,
-                total_walking_distance=new_walking_distance,
-                served_students=served_students,
-                cost=new_cost,
-            )
-            new_route.pickup_map = new_pickup_map
-            return new_route
-    return None
-
-def _nearest_insertion(
-    route: Route,
-    problem_model: InputModel,
-    pi: dict[int, float],
-    mu: float,
-    new_route: bool = False,
-) -> Route | None:
-
-    all_students = [s for s in problem_model.students]
-    all_students.sort(
-        key=lambda s: pi.get(s.second_id, 0.0) - min(
-            problem_model.walking_distance_list[cs.second_id]
-            for cs in s.covering_stops if cs.second_id is not None
-        ),
-        # i.e. highest (pi - walking_cost) first
-    )
-
-    unvisited_stops: list[Student] = []
-    for s in all_students:
-        if s.second_id not in route.served_students:
-            if new_route:
-                if pi.get(s.second_id, 0.0):
-                    unvisited_stops.append(s)
-            else:
-                unvisited_stops.append(s)
-
-    best_route = None
-    successfully_added = False
-    if new_route:
-        curr_route = Route(
-            stops=[problem_model.first_depot, problem_model.last_depot],
-            total_distance=0.0,
-            total_walking_distance=0.0,
-            served_students=[],
-        )
-    else:
-        curr_route = route.__copy__()
-    while unvisited_stops:
-        std = unvisited_stops[0]
-        temp_route = best_pickup_for_student(problem_model, std, curr_route, pi, mu)
-        if temp_route is not None:
-            if (
-                temp_route.total_distance <= problem_model.max_travel_distance
-                and len(temp_route.served_students) <= problem_model.capacity_of_vehicle
-            ):
-                curr_route = _stop_swap(temp_route, problem_model, pi, mu)  # swap after each insert
-                successfully_added = True
-        unvisited_stops.remove(std)
-    
-    if successfully_added and curr_route.cost < 0:
-        best_route = curr_route
-        #print(
-        #    f"Nearest insertion route result: Stops {[s.second_id for s in best_route.stops]}, Total distance: {best_route.total_distance}, Total walking distance: {best_route.total_walking_distance}, reduced cost : {best_route.cost}"
-        #)
-    return best_route
+def _insertion_delta(nodes, pos, stop, d) -> float:
+    a, b = nodes[pos - 1].second_id, nodes[pos].second_id
+    s = stop.second_id
+    return d[(a, s)] + d[(s, b)] - d[(a, b)]
 
 
-def _farthest_insertion(
-    problem_model: InputModel,
-    pi: dict[int, float],
-    mu: float,
-) -> Route | None:
-    """Build a route by starting with the student hardest to serve
-    and inserting others around them."""
+def _cheapest_insertion(nodes, stop, d) -> tuple[float, int]:
+    best_delta, best_pos = float("inf"), -1
+    for pos in range(1, len(nodes)):
+        delta = _insertion_delta(nodes, pos, stop, d)
+        if delta < best_delta:
+            best_delta, best_pos = delta, pos
+    return best_delta, best_pos
 
-    all_students = [
-        s for s in problem_model.students if pi.get(s.second_id, 0.0) > 0
-    ]
-    if not all_students:
-        return None
 
-    # Seed: student with highest (pi - best_walking) — most valuable
-    seed = max(
-        all_students,
-        key=lambda s: pi.get(s.second_id, 0.0) - min(
-            problem_model.walking_distance_list[cs.second_id]
-            for cs in s.covering_stops if cs.second_id is not None
-        )
-    )
-
-    curr_route = Route(
-        stops=[problem_model.first_depot, problem_model.last_depot],
-        total_distance=0.0,
-        total_walking_distance=0.0,
-        served_students=[],
-    )
-
-    # Insert seed first
-    temp = best_pickup_for_student(problem_model, seed, curr_route, pi, mu)
-    if temp is None:
-        return None
-    curr_route = temp
-    successfully_added = True
-
-    remaining = [s for s in all_students if s.second_id != seed.second_id]
-
-    while remaining:
-        best_std = None
-        best_temp = None
-        best_gain = float("inf")
-
-        for std in remaining:
-            temp = best_pickup_for_student(problem_model, std, curr_route, pi, mu)
-            if temp is not None:
-                if (
-                    temp.total_distance <= problem_model.max_travel_distance
-                    and len(temp.served_students) <= problem_model.capacity_of_vehicle
-                ):
-                    if temp.cost < best_gain:
-                        best_gain = temp.cost
-                        best_temp = temp
-                        best_std = std
-
-        if best_std is None or best_temp is None:
-            break
-
-        curr_route = _stop_swap(best_temp, problem_model, pi, mu)
-        remaining.remove(best_std)
-    if successfully_added and curr_route and curr_route.cost < 0:
-        return curr_route
-    return None
-
-def _stop_swap(route: Route, problem_model: InputModel, pi: dict, mu: float) -> Route:
-    student_lookup = {s.second_id: s for s in problem_model.students}
-    pickup_map = dict(getattr(route, "pickup_map", {}))
-
+def _two_opt(state: _State, d) -> bool:
+    """Shorten the tour in place (depots fixed). Returns True if improved."""
+    nodes = state.nodes
+    improved_any = False
     improved = True
     while improved:
         improved = False
-        for student_id in list(route.served_students):
-            student = student_lookup.get(student_id)
-            if student is None:
-                continue
+        for i in range(1, len(nodes) - 2):
+            for j in range(i + 1, len(nodes) - 1):
+                a, b = nodes[i - 1].second_id, nodes[i].second_id
+                c, e = nodes[j].second_id, nodes[j + 1].second_id
+                gain = d[(a, b)] + d[(c, e)] - d[(a, c)] - d[(b, e)]
+                if gain > 1e-9:
+                    nodes[i : j + 1] = reversed(nodes[i : j + 1])
+                    state.dist -= gain
+                    improved = improved_any = True
+    return improved_any
 
-            current_stop_id = pickup_map.get(student_id)
-            if current_stop_id is None:
-                continue
 
-            current_stop = next(
-                (st for st in route.stops if st.second_id == current_stop_id), None
-            )
-            if current_stop is None:
-                continue
-
-            # Is this stop exclusive to student_id, or do other served
-            # students also pick up here? If shared, we must not remove
-            # or overwrite it on route.stops when student_id moves off it.
-            stop_shared_with_others = any(
-                sid != student_id and stid == current_stop_id
-                for sid, stid in pickup_map.items()
-            )
-
-            for cs in student.covering_stops:
-                if cs.second_id == current_stop_id:
-                    continue
-
-                new_walk = (
-                    route.total_walking_distance
-                    - problem_model.walking_distance_list[current_stop_id]
-                    + problem_model.walking_distance_list[cs.second_id]
-                )
-                if new_walk >= route.total_walking_distance - 1e-6:
-                    continue
-
-                new_stop_already_in_route = any(
-                    st.second_id == cs.second_id for st in route.stops
-                )
-
-                if not stop_shared_with_others:
-                    # Safe to do the original in-place replacement.
-                    new_stops = [
-                        cs if st.second_id == current_stop_id else st
-                        for st in route.stops
-                    ]
-                    new_dist = sum(
-                        problem_model.distance_matrix[
-                            (new_stops[k].second_id, new_stops[k + 1].second_id)
-                        ]
-                        for k in range(len(new_stops) - 1)
-                    )
-                    candidate_pickup_map = dict(pickup_map)
-                    candidate_pickup_map[student_id] = cs.second_id
-
-                elif new_stop_already_in_route:
-                    # current_stop stays (others still need it); cs is
-                    # already physically on the route, so no distance
-                    # change — just remap this student to it.
-                    new_stops = route.stops
-                    new_dist = route.total_distance
-                    candidate_pickup_map = dict(pickup_map)
-                    candidate_pickup_map[student_id] = cs.second_id
-
-                else:
-                    # current_stop stays (others still need it), and cs
-                    # is a genuinely new physical stop — insert it rather
-                    # than replace, and cost the insertion properly.
-                    candidate_stop, location, new_dist = (
-                        _find_best_location_to_insert_stop_to_route(
-                            route, cs, problem_model
-                        )
-                    )
-                    if candidate_stop is None:
-                        continue
-                    new_stops = (
-                        route.stops[:location] + [cs] + route.stops[location:]
-                    )
-                    candidate_pickup_map = dict(pickup_map)
-                    candidate_pickup_map[student_id] = cs.second_id
-
-                if new_dist <= problem_model.max_travel_distance:
-                    new_cost = (
-                        new_walk
-                        - sum(pi.get(s, 0.0) for s in route.served_students)
-                        - mu
-                    )
-                    new_route = Route(
-                        stops=new_stops,
-                        total_distance=new_dist,
-                        total_walking_distance=new_walk,
-                        served_students=route.served_students,
-                        cost=new_cost,
-                    )
-                    new_route.pickup_map = candidate_pickup_map
-                    route = new_route
-                    pickup_map = candidate_pickup_map
-                    improved = True
-                    break
-    return route
-
-# the objective is to find a route with negative reduced cost that min (c_r -sum pi_i - mu) over all routes r
-def generate_routes(routes, problem_model, pi, mu, lambdas, logger):
-    logger.info("Starting heuristic pricing problem.")
-
-    best_candidate = None
-    routes_eligible = [r for r in routes[1:] if not getattr(r, "is_dummy", False)]
-
-    # Pass 1: extend existing routes
-    for route in routes_eligible:
-        new_route = _nearest_insertion(route, problem_model, pi, mu)
-        if new_route is not None:
-            new_route = _stop_swap(new_route, problem_model, pi, mu)  # ← here
-            if best_candidate is None or new_route.cost < best_candidate.cost:
-                best_candidate = new_route
-
-    # Pass 2: build fresh routes from positive-lambda seeds
-    route_pos_lambda = [i for i, l in enumerate(lambdas) if l > 0.0]
-    for idx in route_pos_lambda:
-        new_route = _nearest_insertion(routes[idx], problem_model, pi, mu, new_route=True)
-        if new_route is not None:
-            new_route = _stop_swap(new_route, problem_model, pi, mu)
-            if best_candidate is None or new_route.cost < best_candidate.cost:
-                best_candidate = new_route
-
-    # Pass 3: completely fresh route — always run
-    fresh = _nearest_insertion(
-        Route(
-            stops=[problem_model.first_depot, problem_model.last_depot],
-            total_distance=0.0,
-            total_walking_distance=0.0,
-            served_students=[],
-        ),
-        problem_model, pi, mu, new_route=True,
+def _student_value(pm: InputModel, student: Student, pi) -> float:
+    """pi_s minus the cheapest walking distance: the best possible gain."""
+    W = pm.walking_distance_list
+    return pi.get(student.second_id, 0.0) - min(
+        W[cs.second_id] for cs in student.covering_stops
     )
-    if fresh is not None:
-        fresh = _stop_swap(fresh, problem_model, pi, mu)
-        if best_candidate is None or fresh.cost < best_candidate.cost:
-            best_candidate = fresh
 
-    # Pass 4: farthest insertion with best-gain student selection
-    farthest = _farthest_insertion(problem_model, pi, mu)
-    if farthest is not None:
-        farthest = _stop_swap(farthest, problem_model, pi, mu)
-        if best_candidate is None or farthest.cost < best_candidate.cost:
-            best_candidate = farthest
 
-    if best_candidate is not None:
-        added, routes = _add_route_to_master(best_candidate, routes, logger)
-        if added:
-            return ModelSuccess.SUCCESS, routes
+def _greedy_add(state: _State, pm: InputModel, pi, candidates, mode: str) -> bool:
+    """Repeatedly insert the best (student, stop, position) that keeps the
+    tour within the distance limit and the bus within capacity.
+
+    mode "ratio": maximise gain per extra distance (distance is the scarce
+    resource); mode "gain": maximise gain, break ties by extra distance.
+    """
+    d, W = pm.distance_matrix, pm.walking_distance_list
+    added = False
+    while len(state.assign) < pm.capacity_of_vehicle:
+        best = None  # (score, student, stop, pos, delta)
+        for s in candidates:
+            if s.second_id in state.assign:
+                continue
+            pi_s = pi.get(s.second_id, 0.0)
+            for stop in s.covering_stops:
+                gain = pi_s - W[stop.second_id]
+                if gain <= GAIN_EPS:
+                    continue
+                delta, pos = _cheapest_insertion(state.nodes, stop, d)
+                if pos < 0 or state.dist + delta > pm.max_travel_distance:
+                    continue
+                score = gain / (delta + 1e-3) if mode == "ratio" else gain - 1e-6 * delta
+                if best is None or score > best[0]:
+                    best = (score, s, stop, pos, delta)
+        if best is None:
+            break
+        _, s, stop, pos, delta = best
+        state.nodes.insert(pos, stop)
+        state.assign[s.second_id] = stop
+        state.dist += delta
+        added = True
+    return added
+
+
+def _drop_and_switch(state: _State, pm: InputModel, pi) -> bool:
+    """Drop students that cost more than they earn; move students to a
+    cheaper-to-walk stop whenever the tour still fits."""
+    d, W = pm.distance_matrix, pm.walking_distance_list
+    student_by_id = {s.second_id: s for s in pm.students}
+    changed = False
+
+    for sid in list(state.assign):
+        node = state.assign[sid]
+        idx = state.nodes.index(node)
+        prev_id, next_id = state.nodes[idx - 1].second_id, state.nodes[idx + 1].second_id
+        saved = (
+            d[(prev_id, node.second_id)]
+            + d[(node.second_id, next_id)]
+            - d[(prev_id, next_id)]
+        )
+
+        if pi.get(sid, 0.0) < W[node.second_id] - GAIN_EPS:
+            state.nodes.pop(idx)
+            del state.assign[sid]
+            state.dist -= saved
+            changed = True
+            continue
+
+        # try cheaper stops for this student, removing its current node first
+        rest = state.nodes[:idx] + state.nodes[idx + 1 :]
+        rest_dist = state.dist - saved
+        for cs in sorted(student_by_id[sid].covering_stops, key=lambda c: W[c.second_id]):
+            if W[cs.second_id] >= W[node.second_id] - 1e-9:
+                break
+            delta, pos = _cheapest_insertion(rest, cs, d)
+            if pos >= 0 and rest_dist + delta <= pm.max_travel_distance:
+                rest.insert(pos, cs)
+                state.nodes = rest
+                state.assign[sid] = cs
+                state.dist = rest_dist + delta
+                changed = True
+                break
+    return changed
+
+
+def _improve(state: _State, pm: InputModel, pi, candidates) -> None:
+    d = pm.distance_matrix
+    for _ in range(MAX_IMPROVE_ROUNDS):
+        changed = _two_opt(state, d)
+        changed |= _drop_and_switch(state, pm, pi)
+        changed |= _greedy_add(state, pm, pi, candidates, "ratio")
+        if not changed:
+            break
+
+
+def _state_to_route(state: _State, pm: InputModel, pi, mu) -> Route:
+    W = pm.walking_distance_list
+    walking = sum(W[n.second_id] for n in state.assign.values())
+    return Route(
+        stops=list(state.nodes),
+        total_distance=state.dist,
+        total_walking_distance=walking,
+        served_students=set(state.assign),
+        cost=walking - sum(pi.get(s, 0.0) for s in state.assign) - mu,
+        pickup_map={s: n.second_id for s, n in state.assign.items()},
+    )
+
+
+def _state_from_route(route: Route, pm: InputModel) -> _State | None:
+    """Rebuild construction state from an existing route's stop nodes."""
+    d = pm.distance_matrix
+    nodes = list(route.stops)
+    assign = {n.student_id: n for n in nodes[1:-1]}
+    if len(assign) != len(nodes) - 2:
+        return None
+    dist = sum(
+        d[(nodes[k].second_id, nodes[k + 1].second_id)] for k in range(len(nodes) - 1)
+    )
+    return _State(nodes=nodes, assign=assign, dist=dist)
+
+
+def _seed_state(student: Student, pm: InputModel) -> _State | None:
+    """Single-student start using the cheapest-walking stop that fits."""
+    d, W = pm.distance_matrix, pm.walking_distance_list
+    first, last = pm.first_depot.second_id, pm.last_depot.second_id
+    for stop in sorted(student.covering_stops, key=lambda c: W[c.second_id]):
+        dist = d[(first, stop.second_id)] + d[(stop.second_id, last)]
+        if dist <= pm.max_travel_distance:
+            return _State(
+                nodes=[pm.first_depot, stop, pm.last_depot],
+                assign={student.second_id: stop},
+                dist=dist,
+            )
+    return None
+
+
+def generate_routes(
+    routes, problem_model, pi, mu, lambdas, logger, max_new: int = MAX_NEW_COLUMNS
+):
+    """Heuristic pricing: build several diverse routes, keep the improving ones.
+
+    Starts: (a) greedy from scratch in two scoring modes, (b) greedy from each
+    of the most valuable students as seed, (c) every route currently used by
+    the master (lambda > 0). Each start is polished by local search.
+    """
+    logger.info("Starting heuristic pricing problem.")
+    pm = problem_model
+
+    promising = [s for s in pm.students if _student_value(pm, s, pi) > GAIN_EPS]
+    if not promising:
+        logger.info("No student has pi above its best walking distance.")
+        return ModelSuccess.NO_NEW_ROUTE, routes
+
+    found: dict[tuple, Route] = {}
+
+    def consider(state: _State | None, source: str) -> None:
+        if state is None or not state.assign:
+            return
+        _improve(state, pm, pi, promising)
+        route = _state_to_route(state, pm, pi, mu)
+        route.source = source
+        if route.cost < -RC_TOL:
+            found.setdefault(tuple(n.second_id for n in route.stops), route)
+
+    for mode in ("ratio", "gain"):
+        st = _empty_state(pm)
+        _greedy_add(st, pm, pi, promising, mode)
+        consider(st, f"greedy_{mode}")
+
+    seeds = sorted(promising, key=lambda s: _student_value(pm, s, pi), reverse=True)
+    for seed in seeds[:N_SEEDS]:
+        for mode in ("ratio", "gain"):
+            st = _seed_state(seed, pm)
+            if st is not None:
+                _greedy_add(st, pm, pi, promising, mode)
+                consider(st, f"seed_{mode}")
+
+    if lambdas is not None and len(lambdas) == len(routes):
+        active = [r for r, lam in zip(routes, lambdas) if lam > 1e-9]
+    else:
+        active = routes
+    for r in active:
+        if not getattr(r, "is_dummy", False):
+            consider(_state_from_route(r, pm), "extend_active")
+
+    added = 0
+    for route in sorted(found.values(), key=lambda r: r.cost):
+        if added >= max_new:
+            break
+        ok, routes = _add_route_to_master(route, routes, logger)
+        added += ok
+
+    if added:
+        logger.info(
+            f"Heuristic pricing added {added} routes "
+            f"(best cost {min(r.cost for r in found.values()):.6f})."
+        )
+        return ModelSuccess.SUCCESS, routes
 
     logger.info("No improving route found in heuristic pricing problem.")
     return ModelSuccess.NO_NEW_ROUTE, routes

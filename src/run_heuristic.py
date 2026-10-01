@@ -1,6 +1,7 @@
 from module.input_model import InputModel, DataSource
 from heuristic.multi_start_local_search import MultiStartLocalSearch
 from helper.logger_setup import setup_logger
+from helper.results_db import RunRecorder
 from datetime import datetime
 
 
@@ -34,20 +35,23 @@ def solve(
     logger.info(f"Model info: {model_info}")
     logger.info(f"Number of stops in the problem model: {len(problem_model.all_stops)}")
 
-    start_time = datetime.now()
-    lns = MultiStartLocalSearch(model=problem_model, max_iter=250)
-    logger.info(f"max_iter: {lns.max_iter}")
-    results = lns.run()
+    params = {"max_iter": 250}
+    with RunRecorder("heuristic", problem_model, params, logger) as rec:
+        start_time = datetime.now()
+        lns = MultiStartLocalSearch(model=problem_model, max_iter=params["max_iter"])
+        logger.info(f"max_iter: {lns.max_iter}")
+        results = lns.run()
 
-    end_time = datetime.now()
-    logger.info(f"Total time taken: {end_time - start_time}")
-    if results:
-        logger.info(
-            f'total route distance: {sum(r.total_distance for r in results) if results else "N/A"}, total walking distance: {sum(r.total_walking_distance for r in results) if results else "N/A"}'
-        )
-        for re in results:
-            # print(str(re))
-            logger.info(str(re))
+        end_time = datetime.now()
+        logger.info(f"Total time taken: {end_time - start_time}")
+        if results:
+            logger.info(
+                f'total route distance: {sum(r.total_distance for r in results) if results else "N/A"}, total walking distance: {sum(r.total_walking_distance for r in results) if results else "N/A"}'
+            )
+            for re in results:
+                # print(str(re))
+                logger.info(str(re))
+        rec.set_result(results)
     return results
 
 

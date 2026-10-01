@@ -37,8 +37,8 @@ def setup_logger(name: str = "sbr") -> logging.Logger:
     fh.setFormatter(fmt)
     logger.addHandler(fh)
 
-    sh = logging.StreamHandler()
-    sh.setFormatter(fmt)
-    logger.addHandler(sh)
+    #sh = logging.StreamHandler()
+    #sh.setFormatter(fmt)
+    #logger.addHandler(sh)
 
     return logger

@@ -8,6 +8,12 @@ from module.branch import BranchRule
 
 
 def route_respects_branch_rules(route: Route, branch_rules: list[BranchRule]) -> bool:
+    # The dummy (artificial) route is a feasibility slack, not a real column,
+    # so it is exempt from every branching rule. This is the single place
+    # that decides how branching treats the dummy.
+    if getattr(route, "is_dummy", False):
+        return True
+
     served = set(route.served_students)
 
     for rule in branch_rules:
@@ -16,9 +22,8 @@ def route_respects_branch_rules(route: Route, branch_rules: list[BranchRule]) ->
         has_b = b in served
 
         if rule.mode == "together":
-            pass
-            #if not (has_a == has_b):
-            #    return False
+            if has_a != has_b:
+                return False
 
         elif rule.mode == "separate":
             if has_a and has_b:
@@ -95,7 +100,6 @@ def keep_only_branch_feasible_new_routes(
     Keeps all old routes, but among newly generated routes only retains
     those satisfying current branch rules.
     """
-    dummy_key = _route_key(old_routes[0]) 
     old_keys = set(_route_key(r) for r in old_routes)
     
     result = []
@@ -103,7 +107,7 @@ def keep_only_branch_feasible_new_routes(
 
     for r in new_routes:
         key = _route_key(r)
-        if key == dummy_key or key in old_keys:
+        if getattr(r, "is_dummy", False) or key in old_keys:
             result.append(r)
         else:
             if route_respects_branch_rules(r, branch_rules):

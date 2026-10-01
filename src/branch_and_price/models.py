@@ -11,6 +11,7 @@ from module.result_model import RMPResult
 from module.branch import BranchRule
 
 _PRICING_MODEL_CACHE = {}
+PRICING_RC_TOL = 1e-6
 
 
 def check_new_route_is_duplicate(
@@ -337,9 +338,24 @@ def pricing_problem(
         sp.update()
 
     # ---- Solve ----
+    # Column generation only needs to know whether ANY route has negative
+    # reduced cost, not the most negative one. Cutoff prunes everything that
+    # is not improving (so "no improving route" is proven quickly as
+    # CUTOFF/INFEASIBLE), and BestObjStop ends the search at the first
+    # improving route found.
+    sp.params.Cutoff = -PRICING_RC_TOL
+    sp.params.BestObjStop = -PRICING_RC_TOL
     sp.optimize()
 
-    if sp.status == GRB.OPTIMAL or (sp.status == GRB.TIME_LIMIT and sp.SolCount > 0):
+    if sp.status in (GRB.CUTOFF, GRB.INFEASIBLE, GRB.INF_OR_UNBD):
+        # No route beats the cutoff: a genuine certificate for exact pricing.
+        logger.info("No negative reduced-cost route found (cutoff / infeasible).")
+        return mr.ModelSuccess.NO_NEGATIVE_ROUTE, routes
+
+    if (
+        sp.status in (GRB.OPTIMAL, GRB.USER_OBJ_LIMIT)
+        or (sp.status == GRB.TIME_LIMIT and sp.SolCount > 0)
+    ):
         if sp.status == GRB.TIME_LIMIT:
             logger.warning(
                 f"Pricing subproblem hit time limit but found incumbent: obj={sp.objVal:.6f}"
@@ -433,13 +449,18 @@ def pricing_problem(
             return mr.ModelSuccess.SUCCESS, routes
         
         elif sp.status == GRB.TIME_LIMIT:
-            # Hit limit with no feasible solution found at all
-            logger.warning("Pricing subproblem hit time limit with no incumbent.")
+            # Incumbent is not improving, but optimality was not proven.
+            logger.warning("Pricing subproblem hit time limit; cannot certify.")
             return mr.ModelSuccess.TIME_LIMIT, None
 
         else:
             logger.info("No negative reduced-cost route found.")
             return mr.ModelSuccess.NO_NEGATIVE_ROUTE, routes
+
+    elif sp.status == GRB.TIME_LIMIT:
+        # Hit limit with no feasible solution found at all
+        logger.warning("Pricing subproblem hit time limit with no incumbent.")
+        return mr.ModelSuccess.TIME_LIMIT, None
 
     else:
         logger.warning(f"Subproblem not optimal or infeasible; status: {sp.status}")
@@ -451,8 +472,11 @@ def solve_final_model(
 ):
     S, K = problem_model.students, problem_model.number_of_vehicles
     S_ids = problem_model.all_student_ids
+    # The dummy route is only a feasibility slack for the RMP; it must never
+    # appear in a real solution. Without it, the model is infeasible when the
+    # real columns cannot cover all students with K vehicles.
+    routes = [r for r in routes if not getattr(r, "is_dummy", False)]
     m = gp.Model()
-    # LP relaxation for duals
     lambda_vars = [
         m.addVar(vtype=GRB.BINARY, name=f"lambda_{r}") for r in range(len(routes))
     ]
