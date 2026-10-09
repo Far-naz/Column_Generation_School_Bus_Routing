@@ -16,6 +16,8 @@ from branch_and_price.branch_and_bound import (
     choose_branch_pair_from_fractional_solution,
 )
 from module.branch import BranchRule, BPNode
+from config import PRICING_TIME_LIMIT
+from helper.time_budget import Deadline, NO_DEADLINE
 from module.input_model import InputModel
 from helper import telemetry
 from module.dual_history import DualHistory
@@ -39,6 +41,19 @@ class ColumnGenerationResult:
     result_mode: ModelSuccess
     integer_found: bool
     dual_history: DualHistory = field(default_factory=DualHistory)
+    # RMP objective at the last iteration where exact pricing proved that no
+    # improving column exists: a valid lower bound for this node.
+    certified_lb: float | None = None
+
+
+@dataclass
+class CGOutcome:
+    """What the whole column generation / branch-and-price solve produced."""
+
+    routes: list[Route]            # column pool for the final integer model
+    lower_bound: float | None      # valid lower bound, None if never certified
+    proven_optimal: bool           # solution proven optimal (LB == UB)
+    timed_out: bool                # the time limit stopped the search
 
 
 def _count_selected_integer_routes(
@@ -85,6 +100,7 @@ class ColumnGenerationSolver:
         phase: str = "root",
         node_id: int = 0,
         depth: int = 0,
+        deadline: Deadline = NO_DEADLINE,
     ):
         self.problem_model = problem_model
         self.logger = logger
@@ -96,13 +112,18 @@ class ColumnGenerationSolver:
         self.phase = phase
         self.node_id = node_id
         self.depth = depth
+        self.deadline = deadline
+        self.certified_lb: float | None = None
 
     def _result(self, **kwargs) -> ColumnGenerationResult:
-        return ColumnGenerationResult(**kwargs, dual_history=self.dual_history)
+        return ColumnGenerationResult(
+            **kwargs, dual_history=self.dual_history, certified_lb=self.certified_lb
+        )
 
     def run(self, routes: list[Route]) -> ColumnGenerationResult:
         # A solver instance may be run more than once; each run gets its own trace.
         self.dual_history = DualHistory()
+        self.certified_lb = None
         self.logger.info("Starting column generation loop with %s initial routes.", len(routes))
 
         if len(routes) == 0:
@@ -123,6 +144,12 @@ class ColumnGenerationSolver:
         last_rmp = None
 
         for it in range(self.max_iter):
+            if self.deadline.search_expired():
+                self.logger.warning("Time limit reached; stopping column generation.")
+                return self._result(
+                    success=last_rmp is not None, routes=routes, rmp=last_rmp,
+                    result_mode=ModelSuccess.TIME_LIMIT, integer_found=False,
+                )
             self.logger.info("--- Iteration %s ---", it + 1)
             self.logger.info(
                 "Branch rules: %s",
@@ -236,6 +263,7 @@ class ColumnGenerationSolver:
                             pi=pi, mu=mu, problem_model=self.problem_model,
                             routes=copy.deepcopy(master_routes), logger=self.logger,
                             branch_rules=self.branch_rules,
+                            time_limit=self.deadline.cap(PRICING_TIME_LIMIT),
                         )
                         row["exact_time"] = time.perf_counter() - t_e
                         row["exact_status"] = result_mode.name
@@ -285,6 +313,7 @@ class ColumnGenerationSolver:
                         pi=pi, mu=mu, problem_model=self.problem_model,
                         routes=copy.deepcopy(master_routes), logger=self.logger,
                         branch_rules=self.branch_rules,
+                        time_limit=self.deadline.cap(PRICING_TIME_LIMIT),
                     )
                     row["exact_time"] = time.perf_counter() - t_e
                     row["exact_status"] = result_mode.name
@@ -327,6 +356,8 @@ class ColumnGenerationSolver:
                     # objective is a valid lower bound for this node.
                     row["certified"] = True
                     row["lagrangian_lb"] = rmp.obj_value
+                    if not _dummy_lambda_active(rmp.routes, rmp.lambda_values):
+                        self.certified_lb = rmp.obj_value
 
                 # ---- Single, unified termination check ----
                 if result_mode in NO_IMPROVING_COLUMN:
@@ -377,6 +408,7 @@ def column_generation_loop(
     phase: str = "root",
     node_id: int = 0,
     depth: int = 0,
+    deadline: Deadline = NO_DEADLINE,
 ) -> ColumnGenerationResult:
     solver = ColumnGenerationSolver(
         problem_model=problem_model,
@@ -387,6 +419,7 @@ def column_generation_loop(
         phase=phase,
         node_id=node_id,
         depth=depth,
+        deadline=deadline,
     )
     return solver.run(routes)
 
@@ -398,13 +431,26 @@ def branch_and_price_dfs(
     preferred_pair=None,
     max_depth=BP_MAX_DEPTH,
     initial_upper_bound=float("inf"),
+    deadline: Deadline = NO_DEADLINE,
 ):
+    """Depth-first branch-and-price.
+
+    Returns (mode, routes, success, complete). ``complete`` is True only when
+    the whole tree was explored with every node's LP certified, i.e. when the
+    best solution found is proven optimal.
+    """
     best_routes = None
     best_obj = initial_upper_bound
     next_node_id = 0
+    complete = True
 
     def dfs(node: BPNode):
-        nonlocal best_routes, best_obj, next_node_id
+        nonlocal best_routes, best_obj, next_node_id, complete
+
+        if deadline.search_expired():
+            logger.warning("Time limit reached; node %s not explored.", node.node_id)
+            complete = False
+            return False
 
         logger.info(
             "Entering node %s, depth=%s, rules=%s",
@@ -415,6 +461,7 @@ def branch_and_price_dfs(
 
         if node.depth > max_depth:
             logger.info("Max depth reached at node %s", node.node_id)
+            complete = False
             return False
 
         cg_result = column_generation_loop(
@@ -427,13 +474,23 @@ def branch_and_price_dfs(
             phase="branch_and_price",
             node_id=node.node_id,
             depth=node.depth,
+            deadline=deadline,
         )
 
         rmp = cg_result.rmp
         node_routes = cg_result.routes
 
+        if cg_result.result_mode == ModelSuccess.TIME_LIMIT:
+            complete = False
+            return False
+
         if not cg_result.success or rmp is None or not rmp.success:
             return False
+
+        # Without a certificate the node's LP value is not a bound, so neither
+        # pruning nor branching from it can prove optimality.
+        if cg_result.certified_lb is None:
+            complete = False
 
         # Prune only against a valid incumbent integer solution.
         if best_routes is not None and rmp.obj_value >= best_obj - 1e-6:
@@ -450,6 +507,7 @@ def branch_and_price_dfs(
             preferred_pair=preferred_pair,
         )
         if branch_pair is None:
+            complete = False
             return False
 
         a, b = branch_pair
@@ -486,12 +544,15 @@ def branch_and_price_dfs(
     success = dfs(root)
 
     if success and best_routes is not None:
-        return ModelSuccess.SUCCESS, best_routes, True
+        return ModelSuccess.SUCCESS, best_routes, True, complete
 
-    return ModelSuccess.INFEASIBLE, routes, False
+    return ModelSuccess.INFEASIBLE, routes, False, complete
 
 
-def main_column_generation(problem_model, initial_routes: list[Route], logger) -> list[Route]:
+def main_column_generation(
+    problem_model, initial_routes: list[Route], logger,
+    deadline: Deadline = NO_DEADLINE,
+) -> CGOutcome:
     routes = copy.deepcopy(initial_routes)
 
     cg_result = column_generation_loop(
@@ -501,11 +562,19 @@ def main_column_generation(problem_model, initial_routes: list[Route], logger) -
         branch_rules=[],
         max_iter=ROOT_MAX_ITER,
         is_heuristic=True,
+        deadline=deadline,
     )
+    # The certified root LP value bounds every integer solution.
+    root_lb = cg_result.certified_lb
+
+    if cg_result.result_mode == ModelSuccess.TIME_LIMIT or deadline.search_expired():
+        logger.warning("Time limit reached at the root; skipping branch-and-price.")
+        return CGOutcome(cg_result.routes, root_lb, False, True)
 
     if cg_result.integer_found:
         logger.info("Solved directly by heuristic column generation.")
-        return cg_result.routes
+        # Integer and certified at the root: the LP optimum is integral.
+        return CGOutcome(cg_result.routes, root_lb, root_lb is not None, False)
 
     logger.info(
         "Heuristic column generation did not finish integrally. Starting branch-and-price."
@@ -514,16 +583,18 @@ def main_column_generation(problem_model, initial_routes: list[Route], logger) -
     # Do not use an LP relaxation value as an incumbent upper bound.
     initial_ub = float("inf")
 
-    dfs_result_mode, best_routes, dfs_success = branch_and_price_dfs(
+    dfs_result_mode, best_routes, dfs_success, complete = branch_and_price_dfs(
         routes=cg_result.routes,
         problem_model=problem_model,
         logger=logger,
         initial_upper_bound=initial_ub,
+        deadline=deadline,
     )
+    timed_out = deadline.search_expired()
 
     if dfs_success or dfs_result_mode == ModelSuccess.SUCCESS:
         logger.info("Branch-and-price successful.")
-        return best_routes
+        return CGOutcome(best_routes, root_lb, complete, timed_out)
 
     logger.info("Branch-and-price failed. Returning best known route pool.")
-    return cg_result.routes
+    return CGOutcome(cg_result.routes, root_lb, False, timed_out)

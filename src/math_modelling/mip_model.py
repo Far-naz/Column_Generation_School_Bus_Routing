@@ -226,7 +226,7 @@ def _build_decision_variables(sp: gp.Model, problem_model: InputModel) -> Decisi
 def main_problem(
     problem_model: InputModel,
     logger: logging.Logger,
-    time_limit: int = 1800,
+    time_limit: float = 1800,
     decision_var_minmax = None,
 ):
     K = problem_model.number_of_vehicles
@@ -336,7 +336,7 @@ def shotest_path(problem_model: InputModel, logger: logging.Logger):
 
 
 def minmax_problem(
-    problem_model: InputModel, logger: logging.Logger, time_limit: int = 1800
+    problem_model: InputModel, logger: logging.Logger, time_limit: float = 1800
 ):
     K = problem_model.number_of_vehicles
     d = problem_model.distance_matrix

@@ -139,6 +139,13 @@ CREATE TABLE IF NOT EXISTS cg_columns (
 CREATE INDEX IF NOT EXISTS idx_cg_columns_run ON cg_columns(run_id);
 """
 
+# Columns added to `runs` after its first version; created on the fly so an
+# existing database keeps its rows.
+RUNS_ADDED_COLUMNS = (
+    ("lower_bound", "REAL"),  # valid lower bound on total walking distance
+    ("gap", "REAL"),          # (total_walking_distance - lower_bound) / total_walking_distance
+)
+
 ITERATION_FIELDS = (
     "phase", "node_id", "depth", "iteration", "wall_s", "cpu_s", "rmp_obj",
     "rmp_time", "n_columns", "n_fractional", "is_integer", "dummy_lambda",
@@ -158,6 +165,10 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
+    for name, decl in RUNS_ADDED_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {decl}")
     return conn
 
 
@@ -232,16 +243,21 @@ class RunRecorder:
         self.logger = logger
         self.routes: list = []
         self.status: str | None = None
+        self.lower_bound: float | None = None
         # trace=False disables the per-iteration / per-column collection
         # entirely (the algorithm then talks to a no-op collector).
         self.trace = trace
         self.store_duals = store_duals
         self.telemetry: telemetry.Telemetry | None = None
 
-    def set_result(self, routes, status: str | None = None) -> None:
-        """Record the final routes. Dummy (artificial) routes are never stored."""
+    def set_result(
+        self, routes, status: str | None = None, lower_bound: float | None = None
+    ) -> None:
+        """Record the final routes (dummy routes are never stored) and, when
+        known, a valid lower bound; the gap is computed from both on save."""
         self.routes = [r for r in (routes or []) if not getattr(r, "is_dummy", False)]
         self.status = status or ("success" if self.routes else "no_solution")
+        self.lower_bound = lower_bound
         if self.telemetry is not None:
             self.telemetry.mark_final(self.routes)
 
@@ -284,6 +300,10 @@ class RunRecorder:
 
         total_walk = sum(r.total_walking_distance for r in self.routes) if self.routes else None
         total_dist = sum(r.total_distance for r in self.routes) if self.routes else None
+        gap = None
+        if total_walk is not None and self.lower_bound is not None:
+            diff_ub_lb = max(0.0, total_walk - self.lower_bound)
+            gap = diff_ub_lb / total_walk if total_walk > 1e-12 else 0.0
 
         conn = _connect()
         try:
@@ -295,8 +315,9 @@ class RunRecorder:
                         max_travel_distance, allowed_walking_distance, n_students, n_stops,
                         params_json, total_walking_distance, total_route_distance, n_routes,
                         wall_seconds, cpu_seconds, git_commit, git_dirty, git_diff,
-                        python_version, gurobi_version, platform, data_files_json, log_path
-                    ) VALUES (?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?,?,?,?)""",
+                        python_version, gurobi_version, platform, data_files_json, log_path,
+                        lower_bound, gap
+                    ) VALUES (?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?)""",
                     (
                         datetime.now().isoformat(timespec="seconds"),
                         self.method,
@@ -324,6 +345,8 @@ class RunRecorder:
                         platform.platform(),
                         json.dumps(_data_files()),
                         _log_path(self.logger),
+                        self.lower_bound,
+                        gap,
                     ),
                 )
                 run_id = cur.lastrowid

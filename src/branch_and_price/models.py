@@ -9,6 +9,7 @@ from branch_and_price.branch_and_bound import filter_routes_by_branch_rules
 from typing import Optional
 from module.result_model import RMPResult
 from module.branch import BranchRule
+from config import PRICING_TIME_LIMIT
 
 _PRICING_MODEL_CACHE = {}
 PRICING_RC_TOL = 1e-6
@@ -47,7 +48,7 @@ def restricted_master_problem(
         return_full
     - By default returns only (pi, mu), so your existing code remains compatible.
     """
-    print("RMP is started.")
+    #print("RMP is started.")
     if branch_rules is None:
         branch_rules = []
 
@@ -158,9 +159,12 @@ def pricing_problem(
     routes: list[Route],
     logger: logging.Logger,
     branch_rules: Optional[list[BranchRule]] = None,
+    time_limit: Optional[float] = None,
 ):
     """
     Solve or update the pricing problem.
+
+    time_limit: seconds for this call; defaults to config.PRICING_TIME_LIMIT.
 
     If is_initial=True: build the Gurobi model from scratch.
     Otherwise: only update objective coefficients (pi, mu, W).
@@ -192,7 +196,7 @@ def pricing_problem(
 
     if cached_model is None:
         sp = gp.Model("pricing")
-        sp.params.TimeLimit = 1800
+        sp.params.TimeLimit = PRICING_TIME_LIMIT if time_limit is None else time_limit
 
         x = {}
         for i in N_H:
@@ -372,7 +376,7 @@ def pricing_problem(
         )
         print(f'Exact price is finished by obj:{obj_calculated}')
 
-        if obj_calculated < -1e-6:
+        if obj_calculated < -1e-3:
 
             first = first_depot_index
             last = last_depot_index
@@ -468,7 +472,8 @@ def pricing_problem(
 
 
 def solve_final_model(
-    routes: list[Route], problem_model: InputModel, logger: logging.Logger
+    routes: list[Route], problem_model: InputModel, logger: logging.Logger,
+    time_limit: Optional[float] = None,
 ):
     S, K = problem_model.students, problem_model.number_of_vehicles
     S_ids = problem_model.all_student_ids
@@ -502,9 +507,15 @@ def solve_final_model(
     # Vehicle limit
     m.addConstr(gp.quicksum(lambda_vars[r] for r, _ in enumerate(routes)) <= K)
     m.params.OutputFlag = 0
+    if time_limit is not None:
+        m.params.TimeLimit = time_limit
     m.optimize()
-    if m.status == GRB.OPTIMAL:
+    if m.status == GRB.OPTIMAL or (m.status == GRB.TIME_LIMIT and m.SolCount > 0):
         final_routes: list[Route] = []
+        if m.status == GRB.TIME_LIMIT:
+            logger.warning(
+                f"Final model hit its time limit; best found {m.ObjVal}, bound {m.ObjBound}"
+            )
         logger.info(f"Optimal objective: {m.ObjVal}")
         logger.info("Route usage:")
         for r, route in enumerate(routes):

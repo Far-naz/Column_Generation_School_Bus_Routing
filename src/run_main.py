@@ -8,6 +8,8 @@ from branch_and_price.models import solve_final_model
 from branch_and_price.warm_start import create_initial_route
 from heuristic.helper import drop_duplicate_students
 from helper.results_db import RunRecorder
+from helper.time_budget import Deadline
+from config import TIME_LIMIT, FINAL_MODEL_RESERVE, PRICING_TIME_LIMIT
 import branch_and_price.column_generation as cg
 import branch_and_price.models as models
 import branch_and_price.pricing_heuristic as ph
@@ -15,17 +17,19 @@ import branch_and_price.pricing_heuristic as ph
 import logging
 from datetime import datetime
 
+# Gurobi's "no limit" value, used when time_limit is None.
+NO_TIME_LIMIT = 1e100
 
-MILP_TIME_LIMIT = 3600
 
-
-def _cg_params() -> dict:
+def _cg_params(time_limit) -> dict:
     """Algorithm settings of the column generation run, for reproducibility."""
     return {
+        "time_limit": time_limit,
+        "final_model_reserve": FINAL_MODEL_RESERVE,
         "root_max_iter": cg.ROOT_MAX_ITER,
         "node_max_iter": cg.NODE_MAX_ITER,
         "bp_max_depth": cg.BP_MAX_DEPTH,
-        "pricing_time_limit": models.PRICING_TIME_LIMIT,
+        "pricing_time_limit": PRICING_TIME_LIMIT,
         "pricing_rc_tol": models.PRICING_RC_TOL,
         "heuristic_rc_tol": ph.RC_TOL,
         "heuristic_max_new_columns": ph.MAX_NEW_COLUMNS,
@@ -39,8 +43,11 @@ def main_exact(number_of_vehicles,
     max_travel_distance,
     allowed_walking_distance,
     school_id,
-    data_source= DataSource.REAL) -> None| list[Route]:
-    
+    data_source= DataSource.REAL,
+    time_limit: float | None = TIME_LIMIT) -> None| list[Route]:
+    """time_limit: total solve time in seconds (default config.TIME_LIMIT,
+    None = no limit). Data loading is not counted."""
+
     mip_model = False
     min_max_problem = False
     problem_model = InputModel(
@@ -64,16 +71,17 @@ def main_exact(number_of_vehicles,
     if mip_model:
         method = "milp_minmax" if min_max_problem else "milp"
         logger = setup_logger(f"{method}_{model_info}")
-        params = {"time_limit": MILP_TIME_LIMIT}
+        params = {"time_limit": time_limit}
+        milp_time_limit = time_limit if time_limit is not None else NO_TIME_LIMIT
 
         with RunRecorder(method, problem_model, params, logger) as rec:
             if min_max_problem:
                 result, routes, sp, var = minmax_problem(
-                    problem_model, logger, time_limit=MILP_TIME_LIMIT
+                    problem_model, logger, time_limit=milp_time_limit
                 )
             else:
                 result, routes = main_problem(
-                    problem_model, logger, time_limit=MILP_TIME_LIMIT
+                    problem_model, logger, time_limit=milp_time_limit
                 )
 
             if result == ModelSuccess.SUCCESS and routes:
@@ -94,8 +102,10 @@ def main_exact(number_of_vehicles,
         )
 
         with RunRecorder(
-            "column_generation", problem_model, _cg_params(), logger
+            "column_generation", problem_model, _cg_params(time_limit), logger
         ) as rec:
+            # one deadline for the whole solve, started together with the clock
+            deadline = Deadline(time_limit, FINAL_MODEL_RESERVE)
             start_time = datetime.now()
             initial_route: Route = create_initial_route(
                 problem_model.students, problem_model.distance_matrix, problem_model
@@ -105,11 +115,16 @@ def main_exact(number_of_vehicles,
                 f"Initial routes: {[f'Route {i}: {[s.second_id for s in r.stops]}' for i, r in enumerate(initial_routes)]}"
             )
 
-            routes = main_column_generation(problem_model, initial_routes, logger)
+            outcome = main_column_generation(
+                problem_model, initial_routes, logger, deadline=deadline
+            )
             # ------------------------------
             # FINAL RMP SOLVE (LP)  Heuristic Solution
             logger.info("--- Final RMP Solve ---")
-            final_routes = solve_final_model(routes, problem_model, logger)
+            final_routes = solve_final_model(
+                outcome.routes, problem_model, logger,
+                time_limit=deadline.final_time_limit(),
+            )
 
             end_time = datetime.now()
             logger.info(f"Total time taken: {end_time - start_time}")
@@ -128,14 +143,25 @@ def main_exact(number_of_vehicles,
                 )
 
                 result_routes = polished_routes if polished_routes else final_routes
-                rec.set_result(result_routes, "success")
+                total_walk = sum(r.total_walking_distance for r in result_routes)
+                if outcome.proven_optimal:
+                    status, lower_bound = "optimal", total_walk
+                else:
+                    status = "time_limit" if outcome.timed_out else "feasible"
+                    lower_bound = outcome.lower_bound
+                logger.info(f"Status: {status}, lower bound: {lower_bound}")
+                rec.set_result(result_routes, status, lower_bound=lower_bound)
                 return result_routes
             logger.warning("Final model infeasible: real columns cannot cover all students.")
-            rec.set_result([], "infeasible")
+            rec.set_result(
+                [], "time_limit" if outcome.timed_out else "infeasible",
+                lower_bound=outcome.lower_bound,
+            )
 
 
 if __name__ == "__main__":
-    main_exact(2, 20, 18.68, 0.5, 42539)
+    main_exact(2, 20, 20, 0.2, 42539)
+    #print(f"{datetime.now()} - Finished run for max travel distance: {dis}")
 
 
 
